@@ -168,6 +168,29 @@ Things that cost time once; check here before debugging something similar.
   explicitly. Compare `nm` of the archive and the shared library after
   adding API.
 
+## Transmission (GTK 3)
+
+- Views must see models only through GtkTreeModel's interface and
+  signals: a filter under a sort model under a view, or a program's own
+  model, has no rows of ours to look at. The view keeps its own tree of the
+  model's rows (as GtkTreeView does) and follows row-inserted, -deleted,
+  -changed, -has-child-toggled and rows-reordered; stores announce sorting
+  as rows-reordered too.
+- A program's cell renderer calls the stock renderers' render functions
+  with its cairo context and its own rectangles: the stock renderers must
+  size and draw themselves, not only be read by Qt's item painting.
+- QStyle::generatedIconPixmap needs a style option (Qt 6 reads its
+  palette): passing nullptr crashed on insensitive icons.
+- GtkFileChooserButton reports "selection-changed" (from the main loop)
+  after gtk_file_chooser_set_filename; Transmission's add dialog reads the
+  torrent only then.
+- Size requests set just before a window is shown reach Qt's layouts only
+  through posted events, and a layout caches its children's size hints:
+  call updateGeometry on the children and invalidate the layouts before
+  sizing the window, or a wrapped label is cut off.
+- Actions' sensitivity has to reach every proxy, tool items included (they
+  are widgets, not QActions).
+
 ## gtkrc and CSS
 
 - Key themes and rc styles belong under what the program does itself: the

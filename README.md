@@ -110,6 +110,21 @@ real tablet).
 
 ![Xournal: a selection copied and pasted](docs/screenshots/xournal-select.png)
 
+[Transmission 3.00](https://transmissionbt.com/), the BitTorrent client's
+GTK 3 interface, unmodified. Its torrent list is a GtkListStore under a
+GtkTreeModelFilter (the "Show:" filters) under a GtkTreeModelSort, each row
+drawn by its own GtkCellRenderer subclass, which in turn renders stock
+text, pixbuf and progress renderers onto cairo; the file lists are tree
+stores with toggles and progress bars; actions come from a GtkUIManager,
+icons from the theme and its built-in fallbacks, row tooltips from a
+tooltip column.
+
+| Transmission, real GTK 3 | Transmission on GTK made Qt |
+| --- | --- |
+| ![Transmission on GTK 3](docs/screenshots/transmission-gtk3.png) | ![Transmission on Qt](docs/screenshots/transmission-qt.png) |
+
+![Transmission: adding a torrent](docs/screenshots/transmission-open-qt.png)
+
 ## Quick start
 
 ```bash
@@ -177,7 +192,7 @@ cairo, Pango, CMake. GLib, cairo and Pango are plain C libraries, not GTK.
 | Layout | GtkLayout (bin_window, adjustments, children), GtkBox/HBox/VBox, GtkButtonBox, GtkGrid, GtkTable, GtkFixed, GtkFrame, GtkAspectFrame, GtkAlignment, GtkEventBox, GtkPaned, GtkNotebook, GtkStack, GtkScrolledWindow, GtkViewport, GtkExpander, GtkHeaderBar, GtkStatusbar |
 | Controls | GtkLabel (markup subset), buttons, toggle/check/radio buttons, GtkEntry (GtkEditable signals), GtkSpinButton, combo boxes, GtkCombo, GtkImage, GtkScale, GtkScrollbar, GtkProgressBar (+ GTK 1 GtkProgress), GtkLevelBar, GtkColorButton |
 | Text | GtkTextBuffer/Iter/Mark/Tag with GTK's signal semantics, GtkTextView with border windows and coordinates, GTK 2's GtkTextLayout and GtkTextAttributes |
-| Lists/trees | GtkListStore, GtkTreeStore, GtkTreeView with columns, cell renderers, sorting, editing |
+| Lists/trees | GtkTreeModel and GtkTreeSortable as interfaces (models programs write work too), GtkListStore, GtkTreeStore, GtkTreeModelFilter, GtkTreeModelSort, row references; GtkTreeView with columns, sorting, editing, type-ahead search, tooltips, row separators; cell renderers as GTK classes, including the program's own (render on cairo, get_size / preferred sizes) |
 | Menus | GtkMenuBar, GtkMenu, all item types, GtkItemFactory, GtkUIManager/GtkAction, GMenuModel, GtkMenuButton, GtkPopover, toolbars |
 | Dialogs | GtkDialog (`gtk_dialog_run`), message/about dialogs, file chooser (with extra widgets), GtkFileSelection, GtkFontSelectionDialog, GtkColorSelectionDialog, GTK 4 async dialogs |
 | Printing | GtkPrintOperation: print dialog, preview, PDF export |
@@ -192,6 +207,7 @@ cairo, Pango, CMake. GLib, cairo and Pango are plain C libraries, not GTK.
 
 Tests: `tests/` (run at all API levels) and every example, headless, via
 ctest. Real programs: Leafpad, Asunder, Galculator, Sylpheed and Xournal (GTK 2),
+Transmission (GTK 3),
 XMMS 1.2.11 and the GTK 1.2 tutorial programs;
 [docs/testing.md](docs/testing.md) explains the comparisons with real GTK.
 
