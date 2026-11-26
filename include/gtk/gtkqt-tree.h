@@ -13,7 +13,7 @@
 
 G_BEGIN_DECLS
 
-typedef struct _GtkTreeModel GtkTreeModel;      /* "interface"; stores are the only models */
+typedef struct _GtkTreeModel GtkTreeModel;      /* an interface: stores, filter and sort models, the program's own */
 typedef struct _GtkTreePath GtkTreePath;
 typedef struct _GtkTreeRowReference GtkTreeRowReference;
 typedef struct _GtkListStore GtkListStore;
@@ -36,8 +36,9 @@ typedef void (*GtkTreeCellDataFunc) (GtkTreeViewColumn *tree_column, GtkCellRend
 typedef gint (*GtkTreeIterCompareFunc) (GtkTreeModel *model, GtkTreeIter *a, GtkTreeIter *b, gpointer user_data);
 
 #define GTK_TYPE_TREE_MODEL   (gtk_tree_model_get_type ())
-#define GTK_TREE_MODEL(o)     ((GtkTreeModel *) (o))
-#define GTK_IS_TREE_MODEL(o)  (GTK_IS_LIST_STORE (o) || GTK_IS_TREE_STORE (o))
+#define GTK_TREE_MODEL(o)     (G_TYPE_CHECK_INSTANCE_CAST ((o), GTK_TYPE_TREE_MODEL, GtkTreeModel))
+#define GTK_IS_TREE_MODEL(o)  (G_TYPE_CHECK_INSTANCE_TYPE ((o), GTK_TYPE_TREE_MODEL))
+#define GTK_TREE_MODEL_GET_IFACE(o) (G_TYPE_INSTANCE_GET_INTERFACE ((o), GTK_TYPE_TREE_MODEL, GtkTreeModelIface))
 #define GTK_TYPE_LIST_STORE   (gtk_list_store_get_type ())
 #define GTK_LIST_STORE(o)     (G_TYPE_CHECK_INSTANCE_CAST ((o), GTK_TYPE_LIST_STORE, GtkListStore))
 #define GTK_IS_LIST_STORE(o)  (G_TYPE_CHECK_INSTANCE_TYPE ((o), GTK_TYPE_LIST_STORE))
@@ -46,8 +47,51 @@ typedef gint (*GtkTreeIterCompareFunc) (GtkTreeModel *model, GtkTreeIter *a, Gtk
 #define GTK_IS_TREE_STORE(o)  (G_TYPE_CHECK_INSTANCE_TYPE ((o), GTK_TYPE_TREE_STORE))
 #define GTK_TYPE_TREE_ITER    (gtk_tree_iter_get_type ())
 #define GTK_TYPE_TREE_PATH    (gtk_tree_path_get_type ())
-#define GTK_TREE_SORTABLE(o)  ((GtkTreeSortable *) (o))
 typedef struct _GtkTreeSortable GtkTreeSortable;
+#define GTK_TYPE_TREE_SORTABLE (gtk_tree_sortable_get_type ())
+#define GTK_TREE_SORTABLE(o)  (G_TYPE_CHECK_INSTANCE_CAST ((o), GTK_TYPE_TREE_SORTABLE, GtkTreeSortable))
+#define GTK_IS_TREE_SORTABLE(o) (G_TYPE_CHECK_INSTANCE_TYPE ((o), GTK_TYPE_TREE_SORTABLE))
+#define GTK_TREE_SORTABLE_GET_IFACE(o) (G_TYPE_INSTANCE_GET_INTERFACE ((o), GTK_TYPE_TREE_SORTABLE, GtkTreeSortableIface))
+GType gtk_tree_sortable_get_type (void) G_GNUC_CONST;
+
+/* GtkTreeModel's virtual functions, for models programs write themselves */
+typedef struct _GtkTreeModelIface {
+  GTypeInterface g_iface;
+  /* signals */
+  void (*row_changed) (GtkTreeModel *tree_model, GtkTreePath *path, GtkTreeIter *iter);
+  void (*row_inserted) (GtkTreeModel *tree_model, GtkTreePath *path, GtkTreeIter *iter);
+  void (*row_has_child_toggled) (GtkTreeModel *tree_model, GtkTreePath *path, GtkTreeIter *iter);
+  void (*row_deleted) (GtkTreeModel *tree_model, GtkTreePath *path);
+  void (*rows_reordered) (GtkTreeModel *tree_model, GtkTreePath *path, GtkTreeIter *iter, gint *new_order);
+  /* virtual table */
+  GtkTreeModelFlags (*get_flags) (GtkTreeModel *tree_model);
+  gint (*get_n_columns) (GtkTreeModel *tree_model);
+  GType (*get_column_type) (GtkTreeModel *tree_model, gint index_);
+  gboolean (*get_iter) (GtkTreeModel *tree_model, GtkTreeIter *iter, GtkTreePath *path);
+  GtkTreePath *(*get_path) (GtkTreeModel *tree_model, GtkTreeIter *iter);
+  void (*get_value) (GtkTreeModel *tree_model, GtkTreeIter *iter, gint column, GValue *value);
+  gboolean (*iter_next) (GtkTreeModel *tree_model, GtkTreeIter *iter);
+  gboolean (*iter_previous) (GtkTreeModel *tree_model, GtkTreeIter *iter);
+  gboolean (*iter_children) (GtkTreeModel *tree_model, GtkTreeIter *iter, GtkTreeIter *parent);
+  gboolean (*iter_has_child) (GtkTreeModel *tree_model, GtkTreeIter *iter);
+  gint (*iter_n_children) (GtkTreeModel *tree_model, GtkTreeIter *iter);
+  gboolean (*iter_nth_child) (GtkTreeModel *tree_model, GtkTreeIter *iter, GtkTreeIter *parent, gint n);
+  gboolean (*iter_parent) (GtkTreeModel *tree_model, GtkTreeIter *iter, GtkTreeIter *child);
+  void (*ref_node) (GtkTreeModel *tree_model, GtkTreeIter *iter);
+  void (*unref_node) (GtkTreeModel *tree_model, GtkTreeIter *iter);
+} GtkTreeModelIface;
+
+typedef struct _GtkTreeSortableIface {
+  GTypeInterface g_iface;
+  void (*sort_column_changed) (GtkTreeSortable *sortable);
+  gboolean (*get_sort_column_id) (GtkTreeSortable *sortable, gint *sort_column_id, GtkSortType *order);
+  void (*set_sort_column_id) (GtkTreeSortable *sortable, gint sort_column_id, GtkSortType order);
+  void (*set_sort_func) (GtkTreeSortable *sortable, gint sort_column_id, GtkTreeIterCompareFunc sort_func,
+                         gpointer user_data, GDestroyNotify destroy);
+  void (*set_default_sort_func) (GtkTreeSortable *sortable, GtkTreeIterCompareFunc sort_func, gpointer user_data,
+                                 GDestroyNotify destroy);
+  gboolean (*has_default_sort_func) (GtkTreeSortable *sortable);
+} GtkTreeSortableIface;
 GType gtk_tree_model_get_type (void) G_GNUC_CONST;
 GType gtk_list_store_get_type (void) G_GNUC_CONST;
 GType gtk_tree_store_get_type (void) G_GNUC_CONST;
@@ -98,6 +142,60 @@ gint         gtk_tree_model_iter_n_children (GtkTreeModel *tree_model, GtkTreeIt
 gboolean     gtk_tree_model_iter_nth_child (GtkTreeModel *tree_model, GtkTreeIter *iter, GtkTreeIter *parent, gint n);
 gboolean     gtk_tree_model_iter_parent (GtkTreeModel *tree_model, GtkTreeIter *iter, GtkTreeIter *child);
 void         gtk_tree_model_foreach (GtkTreeModel *model, GtkTreeModelForeachFunc func, gpointer user_data);
+void         gtk_tree_model_ref_node (GtkTreeModel *tree_model, GtkTreeIter *iter);
+void         gtk_tree_model_unref_node (GtkTreeModel *tree_model, GtkTreeIter *iter);
+/* models announce their changes */
+void         gtk_tree_model_row_changed (GtkTreeModel *tree_model, GtkTreePath *path, GtkTreeIter *iter);
+void         gtk_tree_model_row_inserted (GtkTreeModel *tree_model, GtkTreePath *path, GtkTreeIter *iter);
+void         gtk_tree_model_row_has_child_toggled (GtkTreeModel *tree_model, GtkTreePath *path, GtkTreeIter *iter);
+void         gtk_tree_model_row_deleted (GtkTreeModel *tree_model, GtkTreePath *path);
+void         gtk_tree_model_rows_reordered (GtkTreeModel *tree_model, GtkTreePath *path, GtkTreeIter *iter, gint *new_order);
+void         gtk_tree_model_rows_reordered_with_length (GtkTreeModel *tree_model, GtkTreePath *path, GtkTreeIter *iter,
+                                                        gint *new_order, gint length);
+
+/* GtkTreeModelFilter: the rows of a child model the program wants shown */
+typedef struct _GtkTreeModelFilter { GObject parent; gpointer priv; } GtkTreeModelFilter;
+typedef struct _GtkTreeModelFilterClass { GObjectClass parent_class; } GtkTreeModelFilterClass;
+typedef gboolean (*GtkTreeModelFilterVisibleFunc) (GtkTreeModel *model, GtkTreeIter *iter, gpointer data);
+typedef void (*GtkTreeModelFilterModifyFunc) (GtkTreeModel *model, GtkTreeIter *iter, GValue *value, gint column, gpointer data);
+#define GTK_TYPE_TREE_MODEL_FILTER (gtk_tree_model_filter_get_type ())
+#define GTK_TREE_MODEL_FILTER(o)   (G_TYPE_CHECK_INSTANCE_CAST ((o), GTK_TYPE_TREE_MODEL_FILTER, GtkTreeModelFilter))
+#define GTK_IS_TREE_MODEL_FILTER(o) (G_TYPE_CHECK_INSTANCE_TYPE ((o), GTK_TYPE_TREE_MODEL_FILTER))
+GType         gtk_tree_model_filter_get_type (void) G_GNUC_CONST;
+GtkTreeModel *gtk_tree_model_filter_new (GtkTreeModel *child_model, GtkTreePath *root);
+void          gtk_tree_model_filter_set_visible_func (GtkTreeModelFilter *filter, GtkTreeModelFilterVisibleFunc func,
+                                                      gpointer data, GDestroyNotify destroy);
+void          gtk_tree_model_filter_set_modify_func (GtkTreeModelFilter *filter, gint n_columns, GType *types,
+                                                     GtkTreeModelFilterModifyFunc func, gpointer data, GDestroyNotify destroy);
+void          gtk_tree_model_filter_set_visible_column (GtkTreeModelFilter *filter, gint column);
+GtkTreeModel *gtk_tree_model_filter_get_model (GtkTreeModelFilter *filter);
+gboolean      gtk_tree_model_filter_convert_child_iter_to_iter (GtkTreeModelFilter *filter, GtkTreeIter *filter_iter,
+                                                                GtkTreeIter *child_iter);
+void          gtk_tree_model_filter_convert_iter_to_child_iter (GtkTreeModelFilter *filter, GtkTreeIter *child_iter,
+                                                                GtkTreeIter *filter_iter);
+GtkTreePath  *gtk_tree_model_filter_convert_child_path_to_path (GtkTreeModelFilter *filter, GtkTreePath *child_path);
+GtkTreePath  *gtk_tree_model_filter_convert_path_to_child_path (GtkTreeModelFilter *filter, GtkTreePath *filter_path);
+void          gtk_tree_model_filter_refilter (GtkTreeModelFilter *filter);
+void          gtk_tree_model_filter_clear_cache (GtkTreeModelFilter *filter);
+
+/* GtkTreeModelSort: a child model's rows in another order */
+typedef struct _GtkTreeModelSort { GObject parent; gpointer priv; } GtkTreeModelSort;
+typedef struct _GtkTreeModelSortClass { GObjectClass parent_class; } GtkTreeModelSortClass;
+#define GTK_TYPE_TREE_MODEL_SORT (gtk_tree_model_sort_get_type ())
+#define GTK_TREE_MODEL_SORT(o)   (G_TYPE_CHECK_INSTANCE_CAST ((o), GTK_TYPE_TREE_MODEL_SORT, GtkTreeModelSort))
+#define GTK_IS_TREE_MODEL_SORT(o) (G_TYPE_CHECK_INSTANCE_TYPE ((o), GTK_TYPE_TREE_MODEL_SORT))
+GType         gtk_tree_model_sort_get_type (void) G_GNUC_CONST;
+GtkTreeModel *gtk_tree_model_sort_new_with_model (GtkTreeModel *child_model);
+GtkTreeModel *gtk_tree_model_sort_get_model (GtkTreeModelSort *tree_model);
+gboolean      gtk_tree_model_sort_convert_child_iter_to_iter (GtkTreeModelSort *tree_model_sort, GtkTreeIter *sort_iter,
+                                                              GtkTreeIter *child_iter);
+void          gtk_tree_model_sort_convert_iter_to_child_iter (GtkTreeModelSort *tree_model_sort, GtkTreeIter *child_iter,
+                                                              GtkTreeIter *sorted_iter);
+GtkTreePath  *gtk_tree_model_sort_convert_child_path_to_path (GtkTreeModelSort *tree_model_sort, GtkTreePath *child_path);
+GtkTreePath  *gtk_tree_model_sort_convert_path_to_child_path (GtkTreeModelSort *tree_model_sort, GtkTreePath *sorted_path);
+void          gtk_tree_model_sort_reset_default_sort_func (GtkTreeModelSort *tree_model_sort);
+void          gtk_tree_model_sort_clear_cache (GtkTreeModelSort *tree_model_sort);
+gboolean      gtk_tree_model_sort_iter_is_valid (GtkTreeModelSort *tree_model_sort, GtkTreeIter *iter);
 
 /* GtkListStore / GtkTreeStore */
 GtkListStore *gtk_list_store_new (gint n_columns, ...);
@@ -148,6 +246,9 @@ gboolean gtk_tree_sortable_get_sort_column_id (GtkTreeSortable *sortable, gint *
 void     gtk_tree_sortable_sort_column_changed (GtkTreeSortable *sortable);
 void     gtk_tree_sortable_set_sort_func (GtkTreeSortable *sortable, gint sort_column_id, GtkTreeIterCompareFunc sort_func,
                                           gpointer user_data, GDestroyNotify destroy);
+void     gtk_tree_sortable_set_default_sort_func (GtkTreeSortable *sortable, GtkTreeIterCompareFunc sort_func,
+                                                  gpointer user_data, GDestroyNotify destroy);
+gboolean gtk_tree_sortable_has_default_sort_func (GtkTreeSortable *sortable);
 
 /* GtkCellRenderer */
 struct _GtkCellRenderer { GInitiallyUnowned parent_instance; gpointer priv; };
@@ -429,6 +530,14 @@ GtkTreeRowReference *gtk_tree_row_reference_new (GtkTreeModel *model, GtkTreePat
 GType      gtk_tree_row_reference_get_type (void) G_GNUC_CONST;
 #define GTK_TYPE_TREE_ROW_REFERENCE (gtk_tree_row_reference_get_type ())
 GtkTreeRowReference *gtk_tree_row_reference_copy (GtkTreeRowReference *reference);
+GtkTreeRowReference *gtk_tree_row_reference_new_proxy (GObject *proxy, GtkTreeModel *model, GtkTreePath *path);
+void                 gtk_tree_row_reference_inserted (GObject *proxy, GtkTreePath *path);
+void                 gtk_tree_row_reference_deleted (GObject *proxy, GtkTreePath *path);
+void                 gtk_tree_row_reference_reordered (GObject *proxy, GtkTreePath *path, GtkTreeIter *iter, gint *new_order);
+GtkTreePath *gtk_tree_path_new_from_indicesv (gint *indices, gsize length);
+void gtk_list_store_set_column_types (GtkListStore *list_store, gint n_columns, GType *types);
+void gtk_tree_store_set_column_types (GtkTreeStore *tree_store, gint n_columns, GType *types);
+void gtk_list_store_set_valuesv (GtkListStore *list_store, GtkTreeIter *iter, gint *columns, GValue *values, gint n_values);
 void                 gtk_tree_row_reference_free (GtkTreeRowReference *reference);
 GtkTreePath         *gtk_tree_row_reference_get_path (GtkTreeRowReference *reference);
 GtkTreeModel        *gtk_tree_row_reference_get_model (GtkTreeRowReference *reference);

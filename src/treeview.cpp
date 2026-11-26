@@ -20,188 +20,8 @@
 
 class GtkQtItemModel;
 
-/* ======================================================================
- * Rows and stores
- * ====================================================================== */
-struct Row {
-  std::vector<GValue> values;
-  Row *parent = nullptr;
-  QList<Row *> children;
-  ~Row () { for (GValue &v : values) if (G_IS_VALUE (&v)) g_value_unset (&v); qDeleteAll (children); }
-  int index () const { return parent ? parent->children.indexOf (const_cast<Row *> (this)) : 0; }
-};
-
-struct SortFunc { GtkTreeIterCompareFunc func; gpointer data; GDestroyNotify destroy; };
-
-struct StoreData {
-  QVector<GType> types;
-  Row root;
-  gint stamp = g_random_int ();
-  QList<QPointer<GtkQtItemModel>> adapters;
-  int sort_column = GTK_TREE_SORTABLE_UNSORTED_SORT_COLUMN_ID;
-  GtkSortType sort_order = GTK_SORT_ASCENDING;
-  QMap<int, SortFunc> sort_funcs;
-  bool is_list = true;
-  QList<GtkTreeRowReference *> refs;
-};
-
-/* a row reference holds the row itself: rows keep their Row through
- * inserts, moves and sorting, and the store clears it when the row goes */
-struct _GtkTreeRowReference { GtkTreeModel *model; Row *row; };
-
-struct StoreObj { GObject parent_instance; gpointer priv; };
-static StoreData *store (gpointer model) { return static_cast<StoreData *> (((StoreObj *) model)->priv); }
-
-/* GtkTreeModel as a real (empty) interface so it can be used as a property type */
-extern "C" GType gtk_tree_model_get_type (void)
-{
-  static GType t = 0;
-  if (!t) {
-    t = g_type_register_static_simple (G_TYPE_INTERFACE, "GtkTreeModel", sizeof (GTypeInterface), nullptr, 0, nullptr, (GTypeFlags) 0);
-    g_type_interface_add_prerequisite (t, G_TYPE_OBJECT);
-  }
-  return t;
-}
-
-static void model_iface_init (gpointer, gpointer) {}
-
-struct _GtkListStore { GObject parent_instance; gpointer priv; };
-struct _GtkTreeStore { GObject parent_instance; gpointer priv; };
-typedef struct { GObjectClass parent_class; } GtkListStoreClass;
-typedef struct { GObjectClass parent_class; } GtkTreeStoreClass;
-
-static void store_finalize_impl (GObject *o)
-{
-  StoreData *d = store (o);
-  for (SortFunc &f : d->sort_funcs) if (f.destroy) f.destroy (f.data);
-  delete d;
-}
-
-G_DEFINE_TYPE_WITH_CODE (GtkListStore, gtk_list_store, G_TYPE_OBJECT,
-                         G_IMPLEMENT_INTERFACE (gtk_tree_model_get_type (), model_iface_init))
-G_DEFINE_TYPE_WITH_CODE (GtkTreeStore, gtk_tree_store, G_TYPE_OBJECT,
-                         G_IMPLEMENT_INTERFACE (gtk_tree_model_get_type (), model_iface_init))
-
-static void gtk_list_store_init (GtkListStore *s) { s->priv = new StoreData; }
-static void gtk_tree_store_init (GtkTreeStore *s) { s->priv = new StoreData; store (s)->is_list = false; }
-static void list_finalize (GObject *o) { store_finalize_impl (o); G_OBJECT_CLASS (gtk_list_store_parent_class)->finalize (o); }
-static void tree_finalize (GObject *o) { store_finalize_impl (o); G_OBJECT_CLASS (gtk_tree_store_parent_class)->finalize (o); }
-
-static void model_signals (GType t)
-{
-  g_signal_new ("row-changed", t, G_SIGNAL_RUN_LAST, 0, nullptr, nullptr, nullptr, G_TYPE_NONE, 2, G_TYPE_POINTER, G_TYPE_POINTER);
-  g_signal_new ("row-inserted", t, G_SIGNAL_RUN_FIRST, 0, nullptr, nullptr, nullptr, G_TYPE_NONE, 2, G_TYPE_POINTER, G_TYPE_POINTER);
-  g_signal_new ("row-deleted", t, G_SIGNAL_RUN_FIRST, 0, nullptr, nullptr, nullptr, G_TYPE_NONE, 1, G_TYPE_POINTER);
-  g_signal_new ("sort-column-changed", t, G_SIGNAL_RUN_LAST, 0, nullptr, nullptr, nullptr, G_TYPE_NONE, 0);
-}
-
-static void gtk_list_store_class_init (GtkListStoreClass *klass) { G_OBJECT_CLASS (klass)->finalize = list_finalize; model_signals (G_TYPE_FROM_CLASS (klass)); }
-static void gtk_tree_store_class_init (GtkTreeStoreClass *klass) { G_OBJECT_CLASS (klass)->finalize = tree_finalize; model_signals (G_TYPE_FROM_CLASS (klass)); }
-
-static Row *iter_row (GtkTreeModel *m, GtkTreeIter *it) { return it && it->stamp == store (m)->stamp ? static_cast<Row *> (it->user_data) : nullptr; }
-static void set_iter (GtkTreeModel *m, GtkTreeIter *it, Row *r)
-{
-  if (!it) return;
-  it->stamp = r ? store (m)->stamp : 0;
-  it->user_data = r;
-  it->user_data2 = it->user_data3 = nullptr;
-}
-
-static Row *new_row (StoreData *d)
-{
-  auto *r = new Row;
-  r->values.resize (d->types.size ());
-  for (int i = 0; i < d->types.size (); i++) {
-    r->values[i] = G_VALUE_INIT;
-    g_value_init (&r->values[i], d->types[i]);
-  }
-  return r;
-}
-
-/* ======================================================================
- * GtkTreePath
- * ====================================================================== */
-struct _GtkTreePath { std::vector<gint> idx; };
-
-extern "C" {
-GType gtk_tree_path_get_type (void)
-{
-  static GType t = g_boxed_type_register_static ("GtkTreePath", (GBoxedCopyFunc) gtk_tree_path_copy, (GBoxedFreeFunc) gtk_tree_path_free);
-  return t;
-}
-GType gtk_tree_iter_get_type (void)
-{
-  static GType t = g_boxed_type_register_static ("GtkTreeIter", (GBoxedCopyFunc) gtk_tree_iter_copy, (GBoxedFreeFunc) gtk_tree_iter_free);
-  return t;
-}
-GtkTreePath *gtk_tree_path_new (void) { return new GtkTreePath; }
-GtkTreePath *gtk_tree_path_new_first (void) { auto *p = new GtkTreePath; p->idx.push_back (0); return p; }
-
-GtkTreePath *gtk_tree_path_new_from_string (const gchar *path)
-{
-  auto *p = new GtkTreePath;
-  for (const QString &s : gtkqt_str (path).split (':', Qt::SkipEmptyParts)) p->idx.push_back (s.toInt ());
-  if (p->idx.empty ()) { delete p; return nullptr; }
-  return p;
-}
-
-GtkTreePath *gtk_tree_path_new_from_indices (gint first_index, ...)
-{
-  auto *p = new GtkTreePath;
-  va_list ap;
-  va_start (ap, first_index);
-  for (gint i = first_index; i != -1; i = va_arg (ap, gint)) p->idx.push_back (i);
-  va_end (ap);
-  return p;
-}
-
-GtkTreePath *gtk_tree_path_copy (const GtkTreePath *path) { return path ? new GtkTreePath (*path) : nullptr; }
-void gtk_tree_path_free (GtkTreePath *path) { delete path; }
-
-gchar *gtk_tree_path_to_string (GtkTreePath *path)
-{
-  QStringList l;
-  for (int i : path->idx) l << QString::number (i);
-  return g_strdup (l.join (':').toUtf8 ().constData ());
-}
-
-void gtk_tree_path_append_index (GtkTreePath *path, gint i) { path->idx.push_back (i); }
-void gtk_tree_path_prepend_index (GtkTreePath *path, gint i) { path->idx.insert (path->idx.begin (), i); }
-gint gtk_tree_path_get_depth (GtkTreePath *path) { return path->idx.size (); }
-gint *gtk_tree_path_get_indices (GtkTreePath *path) { return path->idx.empty () ? nullptr : path->idx.data (); }
-gint *gtk_tree_path_get_indices_with_depth (GtkTreePath *path, gint *depth) { if (depth) *depth = path->idx.size (); return gtk_tree_path_get_indices (path); }
-
-gint gtk_tree_path_compare (const GtkTreePath *a, const GtkTreePath *b)
-{
-  return a->idx < b->idx ? -1 : a->idx == b->idx ? 0 : 1;
-}
-
-void gtk_tree_path_next (GtkTreePath *path) { if (!path->idx.empty ()) path->idx.back ()++; }
-gboolean gtk_tree_path_prev (GtkTreePath *path) { if (path->idx.empty () || path->idx.back () == 0) return FALSE; path->idx.back ()--; return TRUE; }
-gboolean gtk_tree_path_up (GtkTreePath *path) { if (path->idx.empty ()) return FALSE; path->idx.pop_back (); return !path->idx.empty (); }
-void gtk_tree_path_down (GtkTreePath *path) { path->idx.push_back (0); }
-
-GtkTreeIter *gtk_tree_iter_copy (GtkTreeIter *iter) { return (GtkTreeIter *) g_memdup2 (iter, sizeof (GtkTreeIter)); }
-void gtk_tree_iter_free (GtkTreeIter *iter) { g_free (iter); }
-} /* extern "C" */
-
-static GtkTreePath *row_path (Row *r)
-{
-  auto *p = new GtkTreePath;
-  for (Row *x = r; x && x->parent; x = x->parent) p->idx.insert (p->idx.begin (), x->index ());
-  return p;
-}
-
-static Row *path_row (StoreData *d, GtkTreePath *p)
-{
-  Row *r = &d->root;
-  for (int i : p->idx) {
-    if (i < 0 || i >= r->children.size ()) return nullptr;
-    r = r->children[i];
-  }
-  return r == &d->root ? nullptr : r;
-}
-
+/* paths and models are in treemodel.cpp; the view knows models only
+ * through the GtkTreeModel interface */
 /* ======================================================================
  * Cell renderers (properties hold the current cell's values)
  * ====================================================================== */
@@ -408,72 +228,260 @@ static void gtk_tree_view_column_class_init (GtkTreeViewColumnClass *klass)
 /* ======================================================================
  * The Qt adapter
  * ====================================================================== */
+/* The view's own tree of the model's rows, kept in step by the model's
+ * signals, as GtkTreeView keeps one: Qt's indexes point at its nodes, and
+ * the model is asked for the values of a node through its path (or the
+ * iter it gave, when its iters persist). */
+struct MNode {
+  MNode *parent = nullptr;
+  QList<MNode *> children;
+  int row = 0;
+  GtkTreeIter iter {};
+  bool has_iter = false;
+  ~MNode () { qDeleteAll (children); }
+};
+
 class GtkQtItemModel : public QAbstractItemModel {
 public:
   GtkTreeModel *model;
+  MNode root;
+  bool persist = false;
+  gulong handlers[5] = {};
   std::function<QList<GObject *> ()> columns;   /* GtkTreeViewColumn* list, or a single pseudo column */
   std::function<QList<Cell> *(GObject *)> cells_of;
 
-  GtkQtItemModel (GtkTreeModel *m) : model (m) { store (m)->adapters << this; }
-  ~GtkQtItemModel () override { if (model) store (model)->adapters.removeAll (this); }
-
-  Row *row (const QModelIndex &i) const { return i.isValid () ? static_cast<Row *> (i.internalPointer ()) : &store (model)->root; }
-  QModelIndex index_of (Row *r, int col = 0) const
+  GtkQtItemModel (GtkTreeModel *m) : model ((GtkTreeModel *) g_object_ref (m))
   {
-    if (!r || r == &store (model)->root) return QModelIndex ();
-    return createIndex (r->index (), col, r);
+    persist = gtk_tree_model_get_flags (m) & GTK_TREE_MODEL_ITERS_PERSIST;
+    handlers[0] = g_signal_connect (m, "row-inserted", G_CALLBACK (on_inserted), this);
+    handlers[1] = g_signal_connect (m, "row-deleted", G_CALLBACK (on_deleted), this);
+    handlers[2] = g_signal_connect (m, "row-changed", G_CALLBACK (on_changed), this);
+    handlers[3] = g_signal_connect (m, "row-has-child-toggled", G_CALLBACK (on_child_toggled), this);
+    handlers[4] = g_signal_connect (m, "rows-reordered", G_CALLBACK (on_reordered), this);
+    build (&root, nullptr);
   }
+  ~GtkQtItemModel () override { release (); }
+  void release ()
+  {
+    if (!model) return;
+    for (gulong h : handlers) if (h) g_signal_handler_disconnect (model, h);
+    g_object_unref (model);
+    model = nullptr;
+  }
+
+  /* ---------- the mirror tree ---------- */
+  void build (MNode *n, GtkTreeIter *parent)
+  {
+    GtkTreeIter it;
+    if (!gtk_tree_model_iter_children (model, &it, parent)) return;
+    do {
+      auto *c = new MNode;
+      c->parent = n;
+      c->row = n->children.size ();
+      if (persist) { c->iter = it; c->has_iter = true; }
+      n->children << c;
+      if (gtk_tree_model_iter_has_child (model, &it)) { GtkTreeIter ci = it; build (c, &ci); }
+    } while (gtk_tree_model_iter_next (model, &it));
+  }
+  static void renumber (MNode *parent, int from = 0)
+  {
+    for (int i = from; i < parent->children.size (); i++) parent->children[i]->row = i;
+  }
+  GtkTreePath *path_of (MNode *n) const
+  {
+    GtkTreePath *p = gtk_tree_path_new ();
+    for (MNode *x = n; x && x->parent; x = x->parent) gtk_tree_path_prepend_index (p, x->row);
+    return p;
+  }
+  MNode *node_at (GtkTreePath *p) const
+  {
+    if (!p) return nullptr;
+    int depth = gtk_tree_path_get_depth (p);
+    gint *idx = gtk_tree_path_get_indices (p);
+    const MNode *n = &root;
+    for (int k = 0; k < depth; k++) {
+      if (idx[k] < 0 || idx[k] >= n->children.size ()) return nullptr;
+      n = n->children[idx[k]];
+    }
+    return n == &root ? nullptr : const_cast<MNode *> (n);
+  }
+  /* the node of a model iter */
+  MNode *node_of_iter (GtkTreeIter *it) const
+  {
+    if (!model || !it) return nullptr;
+    GtkTreePath *p = gtk_tree_model_get_path (model, it);
+    MNode *n = node_at (p);
+    gtk_tree_path_free (p);
+    return n;
+  }
+  bool iter_of (MNode *n, GtkTreeIter *it) const
+  {
+    if (!model || !n || n == &root) return false;
+    if (n->has_iter) { *it = n->iter; return true; }
+    GtkTreePath *p = path_of (n);
+    bool ok = gtk_tree_model_get_iter (model, it, p);
+    gtk_tree_path_free (p);
+    return ok;
+  }
+  MNode *node (const QModelIndex &i) const { return i.isValid () ? static_cast<MNode *> (i.internalPointer ()) : const_cast<MNode *> (&root); }
+  QModelIndex index_of (MNode *n, int col = 0) const
+  {
+    if (!n || n == &root) return QModelIndex ();
+    return createIndex (n->row, col, n);
+  }
+
+  /* ---------- the model's signals ---------- */
+  static MNode *parent_node (GtkQtItemModel *a, GtkTreePath *path)
+  {
+    if (gtk_tree_path_get_depth (path) <= 1) return &a->root;
+    GtkTreePath *pp = gtk_tree_path_copy (path);
+    gtk_tree_path_up (pp);
+    MNode *n = a->node_at (pp);
+    gtk_tree_path_free (pp);
+    return n;
+  }
+  static void on_inserted (GtkTreeModel *m, GtkTreePath *path, GtkTreeIter *iter, gpointer data)
+  {
+    auto *a = static_cast<GtkQtItemModel *> (data);
+    MNode *parent = parent_node (a, path);
+    if (!parent) return;
+    GtkTreeIter pit;
+    bool has_parent = parent != &a->root && a->iter_of (parent, &pit);
+    /* the parent's rows were read already (it was built after the insert) */
+    if (parent->children.size () >= gtk_tree_model_iter_n_children (m, has_parent ? &pit : nullptr)) return;
+    int pos = gtk_tree_path_get_indices (path)[gtk_tree_path_get_depth (path) - 1];
+    if (pos < 0 || pos > parent->children.size ()) return;
+    a->beginInsertRows (a->index_of (parent), pos, pos);
+    auto *n = new MNode;
+    n->parent = parent;
+    if (a->persist) { n->iter = *iter; n->has_iter = true; }
+    parent->children.insert (pos, n);
+    renumber (parent, pos);
+    if (gtk_tree_model_iter_has_child (m, iter)) { GtkTreeIter c = *iter; a->build (n, &c); }
+    a->endInsertRows ();
+  }
+  static void on_deleted (GtkTreeModel *, GtkTreePath *path, gpointer data)
+  {
+    auto *a = static_cast<GtkQtItemModel *> (data);
+    MNode *n = a->node_at (path);
+    if (!n) return;
+    MNode *parent = n->parent;
+    int pos = n->row;
+    a->beginRemoveRows (a->index_of (parent), pos, pos);
+    parent->children.removeAt (pos);
+    delete n;
+    renumber (parent, pos);
+    a->endRemoveRows ();
+  }
+  static void on_changed (GtkTreeModel *, GtkTreePath *path, GtkTreeIter *iter, gpointer data)
+  {
+    auto *a = static_cast<GtkQtItemModel *> (data);
+    MNode *n = a->node_at (path);
+    if (!n) return;
+    if (a->persist) { n->iter = *iter; n->has_iter = true; }
+    Q_EMIT a->dataChanged (a->index_of (n, 0), a->index_of (n, a->columnCount (QModelIndex ()) - 1));
+  }
+  static void on_child_toggled (GtkTreeModel *m, GtkTreePath *path, GtkTreeIter *iter, gpointer data)
+  {
+    auto *a = static_cast<GtkQtItemModel *> (data);
+    MNode *n = a->node_at (path);
+    if (!n) return;
+    bool has = gtk_tree_model_iter_has_child (m, iter);
+    if (has && n->children.isEmpty ()) {
+      int count = gtk_tree_model_iter_n_children (m, iter);
+      if (count <= 0) return;
+      a->beginInsertRows (a->index_of (n), 0, count - 1);
+      GtkTreeIter c = *iter;
+      a->build (n, &c);
+      a->endInsertRows ();
+    } else if (!has && !n->children.isEmpty ()) {
+      a->beginRemoveRows (a->index_of (n), 0, n->children.size () - 1);
+      qDeleteAll (n->children);
+      n->children.clear ();
+      a->endRemoveRows ();
+    }
+  }
+  static void on_reordered (GtkTreeModel *, GtkTreePath *path, GtkTreeIter *, gint *order, gpointer data)
+  {
+    auto *a = static_cast<GtkQtItemModel *> (data);
+    MNode *n = gtk_tree_path_get_depth (path) == 0 ? &a->root : a->node_at (path);
+    if (!n || !order) return;
+    QList<MNode *> old = n->children, now;
+    for (int i = 0; i < old.size (); i++) {
+      if (order[i] < 0 || order[i] >= old.size ()) return;
+      now << old[order[i]];
+    }
+    QList<QPersistentModelIndex> parents;
+    if (n != &a->root) parents << QPersistentModelIndex (a->index_of (n));
+    Q_EMIT a->layoutAboutToBeChanged (parents, QAbstractItemModel::VerticalSortHint);
+    n->children = now;
+    renumber (n);
+    for (const QModelIndex &pi : a->persistentIndexList ()) {
+      auto *x = static_cast<MNode *> (pi.internalPointer ());
+      if (x && x->parent == n) a->changePersistentIndex (pi, a->createIndex (x->row, pi.column (), x));
+    }
+    Q_EMIT a->layoutChanged (parents, QAbstractItemModel::VerticalSortHint);
+  }
+
   QModelIndex index (int r, int c, const QModelIndex &parent) const override
   {
-    Row *p = row (parent);
+    MNode *p = node (parent);
     if (r < 0 || r >= p->children.size () || c < 0 || c >= columnCount (parent)) return QModelIndex ();
     return createIndex (r, c, p->children[r]);
   }
   QModelIndex parent (const QModelIndex &i) const override
   {
     if (!i.isValid ()) return QModelIndex ();
-    Row *r = row (i);
-    return index_of (r->parent);
+    return index_of (node (i)->parent);
   }
   int rowCount (const QModelIndex &parent) const override
   {
-    if (parent.column () > 0) return 0;
-    return row (parent)->children.size ();
+    if (parent.column () > 0 || !model) return 0;
+    return node (parent)->children.size ();
   }
   int columnCount (const QModelIndex &) const override { return qMax (1, (int) columns ().size ()); }
 
   /* GTK cell rendering protocol: attributes -> renderer properties -> data func */
-  void prepare (GObject *column, Cell &c, Row *r) const
+  void prepare (GObject *column, Cell &c, GtkTreeIter *it) const
   {
-    GtkTreeIter it;
-    set_iter (model, &it, r);
     for (auto &a : c.attrs) {
-      if (a.second < 0 || a.second >= (int) r->values.size ()) continue;
       GParamSpec *ps = g_object_class_find_property (G_OBJECT_GET_CLASS (c.renderer), a.first.constData ());
-      if (!ps) continue;
+      if (!ps || a.second < 0) continue;
+      GValue mv = G_VALUE_INIT;
+      gtk_tree_model_get_value (model, it, a.second, &mv);
+      if (!G_IS_VALUE (&mv)) continue;
       GValue v = G_VALUE_INIT;
       g_value_init (&v, ps->value_type);
-      if (g_value_type_transformable (G_VALUE_TYPE (&r->values[a.second]), ps->value_type)) {
-        g_value_transform (&r->values[a.second], &v);
+      if (g_value_type_transformable (G_VALUE_TYPE (&mv), ps->value_type)) {
+        g_value_transform (&mv, &v);
         g_object_set_property (G_OBJECT (c.renderer), a.first.constData (), &v);
       }
       g_value_unset (&v);
+      g_value_unset (&mv);
     }
-    if (c.func) c.func ((GtkTreeViewColumn *) column, c.renderer, model, &it, c.func_data);
+    if (c.func) c.func ((GtkTreeViewColumn *) column, c.renderer, model, it, c.func_data);
+  }
+  /* the cells of column col prepared for row i */
+  QList<Cell> *prepared (const QModelIndex &i, GObject **column = nullptr) const
+  {
+    QList<GObject *> cols = columns ();
+    if (!model || i.column () >= cols.size ()) return nullptr;
+    QList<Cell> *cells = cells_of (cols[i.column ()]);
+    GtkTreeIter it;
+    if (!cells || !iter_of (node (i), &it)) return nullptr;
+    for (Cell &c : *cells) prepare (cols[i.column ()], c, &it);
+    if (column) *column = cols[i.column ()];
+    return cells;
   }
 
   QVariant data (const QModelIndex &i, int role) const override
   {
     if (!i.isValid ()) return QVariant ();
-    QList<GObject *> cols = columns ();
-    if (i.column () >= cols.size ()) return QVariant ();
-    QList<Cell> *cells = cells_of (cols[i.column ()]);
+    QList<Cell> *cells = prepared (i);
     if (!cells) return QVariant ();
-    Row *r = row (i);
     QVariant out;
     QStringList texts;
     for (Cell &c : *cells) {
-      prepare (cols[i.column ()], c, r);
       RendererData *d = rd (c.renderer);
       if (!d->visible) continue;
       switch (d->kind) {
@@ -512,11 +520,8 @@ public:
   {
     if (!i.isValid ()) return Qt::NoItemFlags;
     Qt::ItemFlags f = Qt::ItemIsEnabled | Qt::ItemIsSelectable;
-    QList<GObject *> cols = columns ();
-    if (i.column () < cols.size ())
-      if (QList<Cell> *cells = cells_of (cols[i.column ()]))
+    if (QList<Cell> *cells = prepared (i))
         for (Cell &c : *cells) {
-          prepare (cols[i.column ()], c, row (i));
           if (rd (c.renderer)->kind == R_TOGGLE && rd (c.renderer)->activatable) f |= Qt::ItemIsUserCheckable;
           if (rd (c.renderer)->kind == R_TEXT && rd (c.renderer)->editable) f |= Qt::ItemIsEditable;
         }
@@ -531,7 +536,7 @@ public:
     if (!i.isValid () || i.column () >= cols.size ()) return false;
     QList<Cell> *cells = cells_of (cols[i.column ()]);
     if (!cells) return false;
-    GtkTreePath *p = row_path (row (i));
+    GtkTreePath *p = path_of (node (i));
     gchar *ps = gtk_tree_path_to_string (p);
     gtk_tree_path_free (p);
     GtkQtEmitGuard guard;
@@ -572,440 +577,16 @@ public:
     }
   }
 
-  /* change notifications coming from the store */
-  void before_insert (Row *parent, int pos) { beginInsertRows (index_of (parent), pos, pos); }
-  void after_insert () { endInsertRows (); }
-  void before_remove (Row *r) { beginRemoveRows (index_of (r->parent), r->index (), r->index ()); }
-  void after_remove () { endRemoveRows (); }
-  void changed (Row *r) { Q_EMIT dataChanged (index_of (r, 0), index_of (r, columnCount (QModelIndex ()) - 1)); }
-  void relayout_begin () { Q_EMIT layoutAboutToBeChanged (); }
-  void relayout_end ()
-  {
-    for (const QModelIndex &old : persistentIndexList ()) {
-      Row *r = static_cast<Row *> (old.internalPointer ());
-      changePersistentIndex (old, createIndex (r->index (), old.column (), r));
-    }
-    Q_EMIT layoutChanged ();
-  }
   void reset () { beginResetModel (); endResetModel (); }
-  void detach () { beginResetModel (); model = nullptr; endResetModel (); }
-};
-
-/* ---------- store operations ---------- */
-static void emit_row_signal (GtkTreeModel *m, const char *sig, Row *r)
-{
-  GtkTreePath *p = row_path (r);
-  GtkTreeIter it;
-  set_iter (m, &it, r);
-  GtkQtEmitGuard guard;
-  if (!strcmp (sig, "row-deleted")) g_signal_emit_by_name (m, sig, p);
-  else g_signal_emit_by_name (m, sig, p, &it);
-  gtk_tree_path_free (p);
-}
-
-static int compare_rows (GtkTreeModel *m, Row *a, Row *b)
-{
-  StoreData *d = store (m);
-  int col = d->sort_column;
-  if (d->sort_funcs.contains (col)) {
-    GtkTreeIter ia, ib;
-    set_iter (m, &ia, a);
-    set_iter (m, &ib, b);
-    return d->sort_funcs[col].func (m, &ia, &ib, d->sort_funcs[col].data);
-  }
-  if (col < 0 || col >= d->types.size ()) return 0;
-  const GValue *va = &a->values[col], *vb = &b->values[col];
-  switch (G_TYPE_FUNDAMENTAL (d->types[col])) {
-  case G_TYPE_STRING: return g_utf8_collate (g_value_get_string (va) ? g_value_get_string (va) : "", g_value_get_string (vb) ? g_value_get_string (vb) : "");
-  case G_TYPE_INT: return (g_value_get_int (va) > g_value_get_int (vb)) - (g_value_get_int (va) < g_value_get_int (vb));
-  case G_TYPE_UINT: return (g_value_get_uint (va) > g_value_get_uint (vb)) - (g_value_get_uint (va) < g_value_get_uint (vb));
-  case G_TYPE_INT64: return (g_value_get_int64 (va) > g_value_get_int64 (vb)) - (g_value_get_int64 (va) < g_value_get_int64 (vb));
-  case G_TYPE_LONG: return (g_value_get_long (va) > g_value_get_long (vb)) - (g_value_get_long (va) < g_value_get_long (vb));
-  case G_TYPE_DOUBLE: return (g_value_get_double (va) > g_value_get_double (vb)) - (g_value_get_double (va) < g_value_get_double (vb));
-  case G_TYPE_FLOAT: return (g_value_get_float (va) > g_value_get_float (vb)) - (g_value_get_float (va) < g_value_get_float (vb));
-  case G_TYPE_BOOLEAN: return g_value_get_boolean (va) - g_value_get_boolean (vb);
-  default: return 0;
-  }
-}
-
-static void sort_children (GtkTreeModel *m, Row *parent)
-{
-  StoreData *d = store (m);
-  std::stable_sort (parent->children.begin (), parent->children.end (), [m, d] (Row *a, Row *b) {
-    int c = compare_rows (m, a, b);
-    return d->sort_order == GTK_SORT_ASCENDING ? c < 0 : c > 0;
-  });
-  for (Row *c : parent->children) if (!c->children.isEmpty ()) sort_children (m, c);
-}
-
-static void resort (GtkTreeModel *m)
-{
-  StoreData *d = store (m);
-  if (d->sort_column == GTK_TREE_SORTABLE_UNSORTED_SORT_COLUMN_ID) return;
-  for (auto &a : d->adapters) if (a) a->relayout_begin ();
-  sort_children (m, &d->root);
-  for (auto &a : d->adapters) if (a) a->relayout_end ();
-}
-
-static Row *store_insert (GtkTreeModel *m, Row *parent, int pos, GtkTreeIter *iter)
-{
-  StoreData *d = store (m);
-  if (!parent) parent = &d->root;
-  if (pos < 0 || pos > parent->children.size ()) pos = parent->children.size ();
-  Row *r = new_row (d);
-  r->parent = parent;
-  for (auto &a : d->adapters) if (a) a->before_insert (parent, pos);
-  parent->children.insert (pos, r);
-  for (auto &a : d->adapters) if (a) a->after_insert ();
-  set_iter (m, iter, r);
-  emit_row_signal (m, "row-inserted", r);
-  return r;
-}
-
-static void store_set_value (GtkTreeModel *m, Row *r, int col, const GValue *v)
-{
-  StoreData *d = store (m);
-  if (!r || col < 0 || col >= d->types.size ()) return;
-  if (G_VALUE_TYPE (v) == d->types[col]) g_value_copy (v, &r->values[col]);
-  else if (!g_value_transform (v, &r->values[col])) g_warning ("gtk-made-qt: cannot store %s in column %d", G_VALUE_TYPE_NAME (v), col);
-}
-
-static void store_set_valist (GtkTreeModel *m, GtkTreeIter *iter, va_list ap)
-{
-  StoreData *d = store (m);
-  Row *r = iter_row (m, iter);
-  if (!r) return;
-  for (int col = va_arg (ap, gint); col != -1; col = va_arg (ap, gint)) {
-    if (col < 0 || col >= d->types.size ()) { g_warning ("gtk-made-qt: invalid column %d", col); return; }
-    GValue v = G_VALUE_INIT;
-    gchar *err = nullptr;
-    G_VALUE_COLLECT_INIT (&v, d->types[col], ap, 0, &err);
-    if (err) { g_warning ("%s", err); g_free (err); return; }
-    g_value_copy (&v, &r->values[col]);
-    g_value_unset (&v);
-  }
-  for (auto &a : d->adapters) if (a) a->changed (r);
-  emit_row_signal (m, "row-changed", r);
-  if (d->sort_column >= 0) resort (m);
-}
-
-static gboolean store_remove (GtkTreeModel *m, GtkTreeIter *iter)
-{
-  StoreData *d = store (m);
-  Row *r = iter_row (m, iter);
-  if (!r) return FALSE;
-  Row *parent = r->parent;
-  int pos = r->index ();
-  GtkTreePath *p = row_path (r);
-  for (GtkTreeRowReference *ref : d->refs)
-    for (Row *x = ref->row; x; x = x->parent)
-      if (x == r) { ref->row = nullptr; break; }
-  for (auto &a : d->adapters) if (a) a->before_remove (r);
-  parent->children.removeAt (pos);
-  delete r;
-  for (auto &a : d->adapters) if (a) a->after_remove ();
+  void detach ()
   {
-    GtkQtEmitGuard guard;
-    g_signal_emit_by_name (m, "row-deleted", p);
+    beginResetModel ();
+    release ();
+    qDeleteAll (root.children);
+    root.children.clear ();
+    endResetModel ();
   }
-  gtk_tree_path_free (p);
-  if (pos < parent->children.size ()) { set_iter (m, iter, parent->children[pos]); return TRUE; }
-  set_iter (m, iter, nullptr);
-  return FALSE;
-}
-
-static void store_clear (GtkTreeModel *m)
-{
-  StoreData *d = store (m);
-  while (!d->root.children.isEmpty ()) {
-    GtkTreeIter it;
-    set_iter (m, &it, d->root.children.last ());
-    store_remove (m, &it);
-  }
-}
-
-static void store_init_types (GtkTreeModel *m, gint n, GType *types)
-{
-  StoreData *d = store (m);
-  d->types.clear ();
-  for (int i = 0; i < n; i++) d->types << types[i];
-}
-
-extern "C" {
-
-GtkListStore *gtk_list_store_newv (gint n_columns, GType *types)
-{
-  auto *s = (GtkListStore *) g_object_new (GTK_TYPE_LIST_STORE, nullptr);
-  store_init_types (GTK_TREE_MODEL (s), n_columns, types);
-  return s;
-}
-
-GtkListStore *gtk_list_store_new (gint n_columns, ...)
-{
-  QVector<GType> t;
-  va_list ap;
-  va_start (ap, n_columns);
-  for (int i = 0; i < n_columns; i++) t << va_arg (ap, GType);
-  va_end (ap);
-  return gtk_list_store_newv (n_columns, t.data ());
-}
-
-void gtk_list_store_set_valist (GtkListStore *s, GtkTreeIter *iter, va_list ap) { store_set_valist (GTK_TREE_MODEL (s), iter, ap); }
-
-void gtk_list_store_set (GtkListStore *s, GtkTreeIter *iter, ...)
-{
-  va_list ap;
-  va_start (ap, iter);
-  store_set_valist (GTK_TREE_MODEL (s), iter, ap);
-  va_end (ap);
-}
-
-void gtk_list_store_set_value (GtkListStore *s, GtkTreeIter *iter, gint column, GValue *value)
-{
-  Row *r = iter_row (GTK_TREE_MODEL (s), iter);
-  store_set_value (GTK_TREE_MODEL (s), r, column, value);
-  if (r) { for (auto &a : store (s)->adapters) if (a) a->changed (r); emit_row_signal (GTK_TREE_MODEL (s), "row-changed", r); }
-}
-
-gboolean gtk_list_store_remove (GtkListStore *s, GtkTreeIter *iter) { return store_remove (GTK_TREE_MODEL (s), iter); }
-void gtk_list_store_insert (GtkListStore *s, GtkTreeIter *iter, gint position) { store_insert (GTK_TREE_MODEL (s), nullptr, position, iter); }
-
-void gtk_list_store_insert_with_values (GtkListStore *s, GtkTreeIter *iter, gint position, ...)
-{
-  GtkTreeIter local;
-  if (!iter) iter = &local;
-  store_insert (GTK_TREE_MODEL (s), nullptr, position, iter);
-  va_list ap;
-  va_start (ap, position);
-  store_set_valist (GTK_TREE_MODEL (s), iter, ap);
-  va_end (ap);
-}
-
-void gtk_list_store_prepend (GtkListStore *s, GtkTreeIter *iter) { store_insert (GTK_TREE_MODEL (s), nullptr, 0, iter); }
-void gtk_list_store_append (GtkListStore *s, GtkTreeIter *iter) { store_insert (GTK_TREE_MODEL (s), nullptr, -1, iter); }
-void gtk_list_store_clear (GtkListStore *s) { store_clear (GTK_TREE_MODEL (s)); }
-gboolean gtk_list_store_iter_is_valid (GtkListStore *s, GtkTreeIter *iter) { return iter_row (GTK_TREE_MODEL (s), iter) != nullptr; }
-
-void gtk_list_store_swap (GtkListStore *s, GtkTreeIter *a, GtkTreeIter *b)
-{
-  Row *ra = iter_row (GTK_TREE_MODEL (s), a), *rb = iter_row (GTK_TREE_MODEL (s), b);
-  if (!ra || !rb) return;
-  StoreData *d = store (s);
-  for (auto &ad : d->adapters) if (ad) ad->relayout_begin ();
-  d->root.children.swapItemsAt (ra->index (), rb->index ());
-  for (auto &ad : d->adapters) if (ad) ad->relayout_end ();
-}
-
-GtkTreeStore *gtk_tree_store_newv (gint n_columns, GType *types)
-{
-  auto *s = (GtkTreeStore *) g_object_new (GTK_TYPE_TREE_STORE, nullptr);
-  store_init_types (GTK_TREE_MODEL (s), n_columns, types);
-  return s;
-}
-
-GtkTreeStore *gtk_tree_store_new (gint n_columns, ...)
-{
-  QVector<GType> t;
-  va_list ap;
-  va_start (ap, n_columns);
-  for (int i = 0; i < n_columns; i++) t << va_arg (ap, GType);
-  va_end (ap);
-  return gtk_tree_store_newv (n_columns, t.data ());
-}
-
-void gtk_tree_store_set_valist (GtkTreeStore *s, GtkTreeIter *iter, va_list ap) { store_set_valist (GTK_TREE_MODEL (s), iter, ap); }
-
-void gtk_tree_store_set (GtkTreeStore *s, GtkTreeIter *iter, ...)
-{
-  va_list ap;
-  va_start (ap, iter);
-  store_set_valist (GTK_TREE_MODEL (s), iter, ap);
-  va_end (ap);
-}
-
-void gtk_tree_store_set_value (GtkTreeStore *s, GtkTreeIter *iter, gint column, GValue *value)
-{
-  gtk_list_store_set_value ((GtkListStore *) s, iter, column, value);
-}
-
-gboolean gtk_tree_store_remove (GtkTreeStore *s, GtkTreeIter *iter) { return store_remove (GTK_TREE_MODEL (s), iter); }
-
-void gtk_tree_store_insert (GtkTreeStore *s, GtkTreeIter *iter, GtkTreeIter *parent, gint position)
-{
-  store_insert (GTK_TREE_MODEL (s), parent ? iter_row (GTK_TREE_MODEL (s), parent) : nullptr, position, iter);
-}
-
-void gtk_tree_store_prepend (GtkTreeStore *s, GtkTreeIter *iter, GtkTreeIter *parent) { gtk_tree_store_insert (s, iter, parent, 0); }
-void gtk_tree_store_append (GtkTreeStore *s, GtkTreeIter *iter, GtkTreeIter *parent) { gtk_tree_store_insert (s, iter, parent, -1); }
-void gtk_tree_store_clear (GtkTreeStore *s) { store_clear (GTK_TREE_MODEL (s)); }
-
-/* ---------- GtkTreeModel ---------- */
-GtkTreeModelFlags gtk_tree_model_get_flags (GtkTreeModel *m)
-{
-  return store (m)->is_list ? (GtkTreeModelFlags) (GTK_TREE_MODEL_ITERS_PERSIST | GTK_TREE_MODEL_LIST_ONLY) : GTK_TREE_MODEL_ITERS_PERSIST;
-}
-gint gtk_tree_model_get_n_columns (GtkTreeModel *m) { return store (m)->types.size (); }
-GType gtk_tree_model_get_column_type (GtkTreeModel *m, gint index_) { return store (m)->types.value (index_, G_TYPE_INVALID); }
-
-gboolean gtk_tree_model_get_iter (GtkTreeModel *m, GtkTreeIter *iter, GtkTreePath *path)
-{
-  Row *r = path ? path_row (store (m), path) : nullptr;
-  set_iter (m, iter, r);
-  return r != nullptr;
-}
-
-gboolean gtk_tree_model_get_iter_from_string (GtkTreeModel *m, GtkTreeIter *iter, const gchar *path_string)
-{
-  GtkTreePath *p = gtk_tree_path_new_from_string (path_string);
-  gboolean ok = gtk_tree_model_get_iter (m, iter, p);
-  gtk_tree_path_free (p);
-  return ok;
-}
-
-gboolean gtk_tree_model_get_iter_first (GtkTreeModel *m, GtkTreeIter *iter)
-{
-  StoreData *d = store (m);
-  set_iter (m, iter, d->root.children.isEmpty () ? nullptr : d->root.children.first ());
-  return !d->root.children.isEmpty ();
-}
-
-GtkTreePath *gtk_tree_model_get_path (GtkTreeModel *m, GtkTreeIter *iter)
-{
-  Row *r = iter_row (m, iter);
-  return r ? row_path (r) : nullptr;
-}
-
-gchar *gtk_tree_model_get_string_from_iter (GtkTreeModel *m, GtkTreeIter *iter)
-{
-  GtkTreePath *p = gtk_tree_model_get_path (m, iter);
-  gchar *s = p ? gtk_tree_path_to_string (p) : nullptr;
-  gtk_tree_path_free (p);
-  return s;
-}
-
-void gtk_tree_model_get_value (GtkTreeModel *m, GtkTreeIter *iter, gint column, GValue *value)
-{
-  StoreData *d = store (m);
-  Row *r = iter_row (m, iter);
-  g_value_init (value, d->types.value (column, G_TYPE_INT));
-  if (r && column >= 0 && column < (int) r->values.size ()) g_value_copy (&r->values[column], value);
-}
-
-void gtk_tree_model_get_valist (GtkTreeModel *m, GtkTreeIter *iter, va_list ap)
-{
-  Row *r = iter_row (m, iter);
-  for (int col = va_arg (ap, gint); col != -1; col = va_arg (ap, gint)) {
-    if (!r || col < 0 || col >= (int) r->values.size ()) { g_warning ("gtk_tree_model_get: invalid column or iter"); return; }
-    gchar *err = nullptr;
-    G_VALUE_LCOPY (&r->values[col], ap, 0, &err);
-    if (err) { g_warning ("%s", err); g_free (err); return; }
-  }
-}
-
-void gtk_tree_model_get (GtkTreeModel *m, GtkTreeIter *iter, ...)
-{
-  va_list ap;
-  va_start (ap, iter);
-  gtk_tree_model_get_valist (m, iter, ap);
-  va_end (ap);
-}
-
-gboolean gtk_tree_model_iter_next (GtkTreeModel *m, GtkTreeIter *iter)
-{
-  Row *r = iter_row (m, iter);
-  if (!r) return FALSE;
-  int i = r->index () + 1;
-  Row *n = i < r->parent->children.size () ? r->parent->children[i] : nullptr;
-  set_iter (m, iter, n);
-  return n != nullptr;
-}
-
-gboolean gtk_tree_model_iter_previous (GtkTreeModel *m, GtkTreeIter *iter)
-{
-  Row *r = iter_row (m, iter);
-  if (!r) return FALSE;
-  int i = r->index () - 1;
-  Row *n = i >= 0 ? r->parent->children[i] : nullptr;
-  set_iter (m, iter, n);
-  return n != nullptr;
-}
-
-gboolean gtk_tree_model_iter_children (GtkTreeModel *m, GtkTreeIter *iter, GtkTreeIter *parent)
-{
-  Row *p = parent ? iter_row (m, parent) : &store (m)->root;
-  Row *c = p && !p->children.isEmpty () ? p->children.first () : nullptr;
-  set_iter (m, iter, c);
-  return c != nullptr;
-}
-
-gboolean gtk_tree_model_iter_has_child (GtkTreeModel *m, GtkTreeIter *iter)
-{
-  Row *r = iter_row (m, iter);
-  return r && !r->children.isEmpty ();
-}
-
-gint gtk_tree_model_iter_n_children (GtkTreeModel *m, GtkTreeIter *iter)
-{
-  Row *r = iter ? iter_row (m, iter) : &store (m)->root;
-  return r ? r->children.size () : 0;
-}
-
-gboolean gtk_tree_model_iter_nth_child (GtkTreeModel *m, GtkTreeIter *iter, GtkTreeIter *parent, gint n)
-{
-  Row *p = parent ? iter_row (m, parent) : &store (m)->root;
-  Row *c = p && n >= 0 && n < p->children.size () ? p->children[n] : nullptr;
-  set_iter (m, iter, c);
-  return c != nullptr;
-}
-
-gboolean gtk_tree_model_iter_parent (GtkTreeModel *m, GtkTreeIter *iter, GtkTreeIter *child)
-{
-  Row *r = iter_row (m, child);
-  Row *p = r && r->parent != &store (m)->root ? r->parent : nullptr;
-  set_iter (m, iter, p);
-  return p != nullptr;
-}
-
-static gboolean foreach_rec (GtkTreeModel *m, Row *r, GtkTreeModelForeachFunc func, gpointer data)
-{
-  for (Row *c : QList<Row *> (r->children)) {
-    GtkTreeIter it;
-    set_iter (m, &it, c);
-    GtkTreePath *p = row_path (c);
-    gboolean stop = func (m, p, &it, data);
-    gtk_tree_path_free (p);
-    if (stop || foreach_rec (m, c, func, data)) return TRUE;
-  }
-  return FALSE;
-}
-
-void gtk_tree_model_foreach (GtkTreeModel *m, GtkTreeModelForeachFunc func, gpointer data) { foreach_rec (m, &store (m)->root, func, data); }
-
-void gtk_tree_sortable_set_sort_column_id (GtkTreeSortable *sortable, gint sort_column_id, GtkSortType order)
-{
-  StoreData *d = store (sortable);
-  d->sort_column = sort_column_id;
-  d->sort_order = order;
-  resort ((GtkTreeModel *) sortable);
-  g_signal_emit_by_name (sortable, "sort-column-changed");
-}
-
-gboolean gtk_tree_sortable_get_sort_column_id (GtkTreeSortable *sortable, gint *sort_column_id, GtkSortType *order)
-{
-  StoreData *d = store (sortable);
-  if (sort_column_id) *sort_column_id = d->sort_column;
-  if (order) *order = d->sort_order;
-  return d->sort_column >= 0;
-}
-
-void gtk_tree_sortable_set_sort_func (GtkTreeSortable *sortable, gint id, GtkTreeIterCompareFunc func, gpointer data, GDestroyNotify destroy)
-{
-  StoreData *d = store (sortable);
-  if (d->sort_funcs.contains (id) && d->sort_funcs[id].destroy) d->sort_funcs[id].destroy (d->sort_funcs[id].data);
-  d->sort_funcs[id] = { func, data, destroy };
-}
-
-} /* extern "C" */
+};
 
 /* ======================================================================
  * Column API
@@ -1191,7 +772,7 @@ public:
       p->setPen (opt.palette.color (QPalette::Midlight));
       p->drawLine (opt.rect.topRight (), opt.rect.bottomRight ());
     }
-    if (d->drag_dest && d->model && path_row (store (d->model), d->drag_dest) == static_cast<Row *> (i.internalPointer ())) {
+    if (d->drag_dest && d->adapter && d->adapter->node_at (d->drag_dest) == static_cast<MNode *> (i.internalPointer ())) {
       p->setPen (QPen (opt.palette.color (QPalette::Text), 2));
       QRect r = opt.rect.adjusted (0, 1, 0, -1);
       switch (d->drag_pos) {
@@ -1333,17 +914,18 @@ static QObject *tree_view_create (GtkWidget *w)
   for (bool expanded : { true, false })
     gtkqt_connect (w, tv, expanded ? &QTreeView::expanded : &QTreeView::collapsed, [expanded] (GtkWidget *vw, const QModelIndex &i) {
       ViewData *vdd = vd (vw);
-      if (!vdd->model) return;
-      Row *r = static_cast<Row *> (i.internalPointer ());
+      if (!vdd->model || !vdd->adapter) return;
+      MNode *r = vdd->adapter->node (i);
       GtkTreeIter it;
-      set_iter (vdd->model, &it, r);
-      GtkTreePath *p = row_path (r);
+      if (!vdd->adapter->iter_of (r, &it)) return;
+      GtkTreePath *p = vdd->adapter->path_of (r);
       g_signal_emit_by_name (vw, expanded ? "row-expanded" : "row-collapsed", &it, p);
       gtk_tree_path_free (p);
     });
   gtkqt_connect (w, tv, &QTreeView::activated, [] (GtkWidget *vw, const QModelIndex &i) {
-    GtkTreePath *p = row_path (static_cast<Row *> (i.internalPointer ()));
     ViewData *d = vd (vw);
+    if (!d->adapter) return;
+    GtkTreePath *p = d->adapter->path_of (d->adapter->node (i));
     g_signal_emit_by_name (vw, "row-activated", p, i.column () < d->columns.size () ? d->columns[i.column ()] : nullptr);
     gtk_tree_path_free (p);
   });
@@ -1464,30 +1046,30 @@ public:
     ViewData *d = vd (view);
     GtkTreeSelection *s = d ? d->selection : nullptr;
     if (!s || !s->func || !d->adapter || !d->model || f == QItemSelectionModel::NoUpdate) { QItemSelectionModel::select (sel, f); return; }
-    QList<Row *> cur;
-    for (const QModelIndex &i : selectedRows ()) cur << d->adapter->row (i);
-    QList<Row *> want = (f & QItemSelectionModel::Clear) ? QList<Row *> () : cur;
+    QList<MNode *> cur;
+    for (const QModelIndex &i : selectedRows ()) cur << d->adapter->node (i);
+    QList<MNode *> want = (f & QItemSelectionModel::Clear) ? QList<MNode *> () : cur;
     for (const QModelIndex &i : sel.indexes ()) {
       if (i.column () != 0 && sel.contains (i.siblingAtColumn (0))) continue;
-      Row *r = d->adapter->row (i);
+      MNode *r = d->adapter->node (i);
       bool in = want.contains (r);
       if ((f & QItemSelectionModel::Select) && !in) want << r;
       else if ((f & QItemSelectionModel::Deselect) && in) want.removeAll (r);
       else if (f & QItemSelectionModel::Toggle) { if (in) want.removeAll (r); else want << r; }
     }
     /* ask about each row whose state would change */
-    auto ask = [&] (Row *r, bool selected) {
-      GtkTreePath *p = row_path (r);
+    auto ask = [&] (MNode *r, bool selected) {
+      GtkTreePath *p = d->adapter->path_of (r);
       gboolean ok = s->func (s, d->model, p, selected, s->func_data);
       gtk_tree_path_free (p);
       return ok;
     };
-    for (Row *r : QList<Row *> (want)) if (!cur.contains (r) && !ask (r, false)) want.removeAll (r);
-    for (Row *r : cur) if (!want.contains (r) && !ask (r, true)) want << r;
+    for (MNode *r : QList<MNode *> (want)) if (!cur.contains (r) && !ask (r, false)) want.removeAll (r);
+    for (MNode *r : cur) if (!want.contains (r) && !ask (r, true)) want << r;
     if (!d->adapter) return;
     QItemSelection out;
     int last = d->adapter->columnCount (QModelIndex ()) - 1;
-    for (Row *r : want) out.select (d->adapter->index_of (r, 0), d->adapter->index_of (r, last));
+    for (MNode *r : want) out.select (d->adapter->index_of (r, 0), d->adapter->index_of (r, last));
     QItemSelectionModel::select (out, QItemSelectionModel::ClearAndSelect | (f & QItemSelectionModel::Current));
   }
 };
@@ -1535,7 +1117,7 @@ void gtk_tree_view_set_model (GtkTreeView *view, GtkTreeModel *model)
   QItemSelectionModel *old = tv->selectionModel ();
   tv->setSelectionModel (new GtkQtSelectionModel (a, w, a));
   delete old;
-  tv->setRootIsDecorated (!store (model)->is_list);
+  tv->setRootIsDecorated (!(gtk_tree_model_get_flags (model) & GTK_TREE_MODEL_LIST_ONLY));
   gtk_tree_view_get_selection (view);
   connect_selection (w);
   view_apply_columns (w);
@@ -1613,7 +1195,7 @@ static QModelIndex view_index (GtkTreeView *view, GtkTreePath *path, int col = 0
 {
   ViewData *d = vd (GTK_WIDGET (view));
   if (!d || !d->adapter || !path) return QModelIndex ();
-  return d->adapter->index_of (path_row (store (d->model), path), col);
+  return d->adapter->index_of (d->adapter->node_at (path), col);
 }
 
 gboolean gtk_tree_view_expand_row (GtkTreeView *view, GtkTreePath *path, gboolean open_all)
@@ -1640,7 +1222,8 @@ void gtk_tree_view_get_cursor (GtkTreeView *view, GtkTreePath **path, GtkTreeVie
 {
   auto *tv = gtkqt_q<QTreeView> (GTK_WIDGET (view));
   QModelIndex i = tv ? tv->currentIndex () : QModelIndex ();
-  if (path) *path = i.isValid () ? row_path (static_cast<Row *> (i.internalPointer ())) : nullptr;
+  ViewData *d = vd (GTK_WIDGET (view));
+  if (path) *path = i.isValid () && d && d->adapter ? d->adapter->path_of (d->adapter->node (i)) : nullptr;
   if (focus_column) *focus_column = i.isValid () ? gtk_tree_view_get_column (view, i.column ()) : nullptr;
 }
 
@@ -1681,29 +1264,38 @@ GtkSelectionMode gtk_tree_selection_get_mode (GtkTreeSelection *s)
   return p ? (GtkSelectionMode) GPOINTER_TO_INT (p) : GTK_SELECTION_SINGLE;
 }
 
-static QList<Row *> selected_rows (GtkTreeSelection *s)
+static GtkQtItemModel *sel_adapter (GtkTreeSelection *s)
 {
-  QList<Row *> rows;
+  ViewData *d = s->view ? vd (GTK_WIDGET (s->view)) : nullptr;
+  return d ? d->adapter.data () : nullptr;
+}
+
+static QList<MNode *> selected_rows (GtkTreeSelection *s)
+{
+  QList<MNode *> rows;
   if (QItemSelectionModel *sm = sel_model (s))
-    for (const QModelIndex &i : sm->selectedRows ()) rows << static_cast<Row *> (i.internalPointer ());
+    for (const QModelIndex &i : sm->selectedRows ()) rows << static_cast<MNode *> (i.internalPointer ());
   return rows;
 }
 
 gboolean gtk_tree_selection_get_selected (GtkTreeSelection *s, GtkTreeModel **model, GtkTreeIter *iter)
 {
   GtkTreeModel *m = s->view ? gtk_tree_view_get_model (s->view) : nullptr;
+  GtkQtItemModel *a = sel_adapter (s);
   if (model) *model = m;
-  QList<Row *> rows = selected_rows (s);
-  if (!m || rows.isEmpty ()) { if (iter) memset (iter, 0, sizeof (*iter)); return FALSE; }
-  set_iter (m, iter, rows.first ());
+  QList<MNode *> rows = selected_rows (s);
+  GtkTreeIter it;
+  if (!m || !a || rows.isEmpty () || !a->iter_of (rows.first (), &it)) { if (iter) memset (iter, 0, sizeof (*iter)); return FALSE; }
+  if (iter) *iter = it;
   return TRUE;
 }
 
 GList *gtk_tree_selection_get_selected_rows (GtkTreeSelection *s, GtkTreeModel **model)
 {
   if (model) *model = s->view ? gtk_tree_view_get_model (s->view) : nullptr;
+  GtkQtItemModel *a = sel_adapter (s);
   GList *l = nullptr;
-  for (Row *r : selected_rows (s)) l = g_list_append (l, row_path (r));
+  if (a) for (MNode *r : selected_rows (s)) l = g_list_append (l, a->path_of (r));
   return l;
 }
 
@@ -1712,39 +1304,41 @@ gint gtk_tree_selection_count_selected_rows (GtkTreeSelection *s) { return selec
 void gtk_tree_selection_selected_foreach (GtkTreeSelection *s, GtkTreeSelectionForeachFunc func, gpointer data)
 {
   GtkTreeModel *m = s->view ? gtk_tree_view_get_model (s->view) : nullptr;
-  if (!m) return;
-  for (Row *r : selected_rows (s)) {
+  GtkQtItemModel *a = sel_adapter (s);
+  if (!m || !a) return;
+  /* paths first: the function may change the model */
+  QList<GtkTreePath *> paths;
+  for (MNode *r : selected_rows (s)) paths << a->path_of (r);
+  for (GtkTreePath *p : paths) {
     GtkTreeIter it;
-    set_iter (m, &it, r);
-    GtkTreePath *p = row_path (r);
-    func (m, p, &it, data);
+    if (gtk_tree_model_get_iter (m, &it, p)) func (m, p, &it, data);
     gtk_tree_path_free (p);
   }
 }
 
-static void select_row (GtkTreeSelection *s, Row *r, QItemSelectionModel::SelectionFlags f)
+static void select_row (GtkTreeSelection *s, MNode *r, QItemSelectionModel::SelectionFlags f)
 {
-  ViewData *d = s->view ? vd (GTK_WIDGET (s->view)) : nullptr;
+  GtkQtItemModel *a = sel_adapter (s);
   QItemSelectionModel *sm = sel_model (s);
-  if (!d || !d->adapter || !sm || !r) return;
+  if (!a || !sm || !r) return;
   if (gtk_tree_selection_get_mode (s) != GTK_SELECTION_MULTIPLE && (f & QItemSelectionModel::Select)) f |= QItemSelectionModel::Clear;
-  sm->select (d->adapter->index_of (r), f | QItemSelectionModel::Rows);
-  if (f & QItemSelectionModel::Select) sm->setCurrentIndex (d->adapter->index_of (r), QItemSelectionModel::NoUpdate);
+  sm->select (a->index_of (r), f | QItemSelectionModel::Rows);
+  if (f & QItemSelectionModel::Select) sm->setCurrentIndex (a->index_of (r), QItemSelectionModel::NoUpdate);
 }
 
 void gtk_tree_selection_select_iter (GtkTreeSelection *s, GtkTreeIter *iter)
 {
-  if (GtkTreeModel *m = s->view ? gtk_tree_view_get_model (s->view) : nullptr) select_row (s, iter_row (m, iter), QItemSelectionModel::Select);
+  if (GtkQtItemModel *a = sel_adapter (s)) select_row (s, a->node_of_iter (iter), QItemSelectionModel::Select);
 }
 
 void gtk_tree_selection_unselect_iter (GtkTreeSelection *s, GtkTreeIter *iter)
 {
-  if (GtkTreeModel *m = s->view ? gtk_tree_view_get_model (s->view) : nullptr) select_row (s, iter_row (m, iter), QItemSelectionModel::Deselect);
+  if (GtkQtItemModel *a = sel_adapter (s)) select_row (s, a->node_of_iter (iter), QItemSelectionModel::Deselect);
 }
 
 void gtk_tree_selection_select_path (GtkTreeSelection *s, GtkTreePath *path)
 {
-  if (GtkTreeModel *m = s->view ? gtk_tree_view_get_model (s->view) : nullptr) select_row (s, path_row (store (m), path), QItemSelectionModel::Select);
+  if (GtkQtItemModel *a = sel_adapter (s)) select_row (s, a->node_at (path), QItemSelectionModel::Select);
 }
 
 void gtk_tree_selection_select_all (GtkTreeSelection *s)
@@ -1756,8 +1350,8 @@ void gtk_tree_selection_unselect_all (GtkTreeSelection *s) { if (QItemSelectionM
 
 gboolean gtk_tree_selection_iter_is_selected (GtkTreeSelection *s, GtkTreeIter *iter)
 {
-  GtkTreeModel *m = s->view ? gtk_tree_view_get_model (s->view) : nullptr;
-  return m && selected_rows (s).contains (iter_row (m, iter));
+  GtkQtItemModel *a = sel_adapter (s);
+  return a && selected_rows (s).contains (a->node_of_iter (iter));
 }
 
 GtkTreeView *gtk_tree_selection_get_tree_view (GtkTreeSelection *s) { return s->view; }
@@ -1880,8 +1474,9 @@ gboolean gtk_combo_box_get_active_iter (GtkComboBox *combo, GtkTreeIter *iter)
 void gtk_combo_box_set_active_iter (GtkComboBox *combo, GtkTreeIter *iter)
 {
   GtkTreeModel *m = gtk_combo_box_get_model (combo);
-  Row *r = m ? iter_row (m, iter) : nullptr;
-  gtk_combo_box_set_active (combo, r ? r->index () : -1);
+  GtkTreePath *p = m && iter ? gtk_tree_model_get_path (m, iter) : nullptr;
+  gtk_combo_box_set_active (combo, p ? gtk_tree_path_get_indices (p)[0] : -1);
+  gtk_tree_path_free (p);
 }
 
 void gtk_combo_box_set_entry_text_column (GtkComboBox *combo, gint text_column)
@@ -2211,153 +1806,10 @@ GtkEntryCompletion *gtk_entry_get_completion (GtkEntry *entry)
 } /* extern "C" */
 
 /* ======================================================================
- * More of the GTK 2 tree API: paths, row references, store moves,
- * selection ranges and select functions, the view's coordinates, rows'
- * drop positions
+ * More of the GTK 2 tree API: selection ranges and select functions, the
+ * view's coordinates, rows' drop positions
  * ====================================================================== */
-static void store_move (GtkTreeModel *m, Row *r, int pos)
-{
-  StoreData *d = store (m);
-  Row *parent = r->parent;
-  for (auto &a : d->adapters) if (a) a->relayout_begin ();
-  parent->children.removeOne (r);
-  if (pos < 0 || pos > parent->children.size ()) pos = parent->children.size ();
-  parent->children.insert (pos, r);
-  for (auto &a : d->adapters) if (a) a->relayout_end ();
-}
-
-static void store_reorder (GtkTreeModel *m, Row *parent, gint *new_order)
-{
-  StoreData *d = store (m);
-  if (!parent) parent = &d->root;
-  QList<Row *> old = parent->children, now;
-  for (int i = 0; i < old.size (); i++) {
-    int o = new_order[i];
-    if (o < 0 || o >= old.size ()) return;
-    now << old[o];
-  }
-  for (auto &a : d->adapters) if (a) a->relayout_begin ();
-  parent->children = now;
-  for (auto &a : d->adapters) if (a) a->relayout_end ();
-}
-
-/* insert next to a sibling (before: at its place, or last without one;
- * after: behind it, or first without one) */
-static void store_insert_by (GtkTreeModel *m, GtkTreeIter *iter, GtkTreeIter *parent, GtkTreeIter *sibling, bool after)
-{
-  Row *sib = sibling ? iter_row (m, sibling) : nullptr;
-  Row *par = sib ? sib->parent : parent ? iter_row (m, parent) : nullptr;
-  int pos = sib ? sib->index () + (after ? 1 : 0) : after ? 0 : -1;
-  store_insert (m, par == &store (m)->root ? nullptr : par, pos, iter);
-}
-
-static void store_move_by (GtkTreeModel *m, GtkTreeIter *iter, GtkTreeIter *position, bool after)
-{
-  Row *r = iter_row (m, iter), *at = position ? iter_row (m, position) : nullptr;
-  if (!r || (at && at->parent != r->parent) || at == r) return;
-  int from = r->index ();
-  int pos = at ? at->index () + (after ? 1 : 0) : after ? 0 : r->parent->children.size ();
-  if (from < pos) pos--;
-  store_move (m, r, pos);
-}
-
 extern "C" {
-
-gboolean gtk_tree_path_is_ancestor (GtkTreePath *path, GtkTreePath *descendant)
-{
-  return path->idx.size () < descendant->idx.size () && std::equal (path->idx.begin (), path->idx.end (), descendant->idx.begin ());
-}
-gboolean gtk_tree_path_is_descendant (GtkTreePath *path, GtkTreePath *ancestor) { return gtk_tree_path_is_ancestor (ancestor, path); }
-
-/* ---------- GtkTreeRowReference ---------- */
-GtkTreeRowReference *gtk_tree_row_reference_new (GtkTreeModel *model, GtkTreePath *path)
-{
-  Row *r = model && path ? path_row (store (model), path) : nullptr;
-  if (!r) return nullptr;
-  auto *ref = new GtkTreeRowReference { (GtkTreeModel *) g_object_ref (model), r };
-  store (model)->refs << ref;
-  return ref;
-}
-GtkTreeRowReference *gtk_tree_row_reference_copy (GtkTreeRowReference *ref)
-{
-  if (!ref) return nullptr;
-  auto *c = new GtkTreeRowReference { (GtkTreeModel *) g_object_ref (ref->model), ref->row };
-  store (ref->model)->refs << c;
-  return c;
-}
-void gtk_tree_row_reference_free (GtkTreeRowReference *ref)
-{
-  if (!ref) return;
-  store (ref->model)->refs.removeOne (ref);
-  g_object_unref (ref->model);
-  delete ref;
-}
-GtkTreePath *gtk_tree_row_reference_get_path (GtkTreeRowReference *ref) { return ref && ref->row ? row_path (ref->row) : nullptr; }
-GtkTreeModel *gtk_tree_row_reference_get_model (GtkTreeRowReference *ref) { return ref ? ref->model : nullptr; }
-gboolean gtk_tree_row_reference_valid (GtkTreeRowReference *ref) { return ref && ref->row; }
-GType gtk_tree_row_reference_get_type (void)
-{
-  static GType t = g_boxed_type_register_static ("GtkTreeRowReference", (GBoxedCopyFunc) gtk_tree_row_reference_copy,
-                                                 (GBoxedFreeFunc) gtk_tree_row_reference_free);
-  return t;
-}
-
-/* ---------- stores ---------- */
-void gtk_list_store_insert_before (GtkListStore *s, GtkTreeIter *iter, GtkTreeIter *sibling) { store_insert_by (GTK_TREE_MODEL (s), iter, nullptr, sibling, false); }
-void gtk_list_store_insert_after (GtkListStore *s, GtkTreeIter *iter, GtkTreeIter *sibling) { store_insert_by (GTK_TREE_MODEL (s), iter, nullptr, sibling, true); }
-void gtk_list_store_reorder (GtkListStore *s, gint *new_order) { store_reorder (GTK_TREE_MODEL (s), nullptr, new_order); }
-void gtk_list_store_move_before (GtkListStore *s, GtkTreeIter *iter, GtkTreeIter *position) { store_move_by (GTK_TREE_MODEL (s), iter, position, false); }
-void gtk_list_store_move_after (GtkListStore *s, GtkTreeIter *iter, GtkTreeIter *position) { store_move_by (GTK_TREE_MODEL (s), iter, position, true); }
-
-void gtk_tree_store_insert_before (GtkTreeStore *s, GtkTreeIter *iter, GtkTreeIter *parent, GtkTreeIter *sibling)
-{
-  store_insert_by (GTK_TREE_MODEL (s), iter, parent, sibling, false);
-}
-void gtk_tree_store_insert_after (GtkTreeStore *s, GtkTreeIter *iter, GtkTreeIter *parent, GtkTreeIter *sibling)
-{
-  store_insert_by (GTK_TREE_MODEL (s), iter, parent, sibling, true);
-}
-void gtk_tree_store_insert_with_values (GtkTreeStore *s, GtkTreeIter *iter, GtkTreeIter *parent, gint position, ...)
-{
-  GtkTreeIter local;
-  if (!iter) iter = &local;
-  gtk_tree_store_insert (s, iter, parent, position);
-  va_list ap;
-  va_start (ap, position);
-  store_set_valist (GTK_TREE_MODEL (s), iter, ap);
-  va_end (ap);
-}
-gboolean gtk_tree_store_is_ancestor (GtkTreeStore *s, GtkTreeIter *iter, GtkTreeIter *descendant)
-{
-  Row *a = iter_row (GTK_TREE_MODEL (s), iter), *r = iter_row (GTK_TREE_MODEL (s), descendant);
-  for (r = r ? r->parent : nullptr; a && r; r = r->parent) if (r == a) return TRUE;
-  return FALSE;
-}
-gint gtk_tree_store_iter_depth (GtkTreeStore *s, GtkTreeIter *iter)
-{
-  int depth = 0;
-  Row *r = iter_row (GTK_TREE_MODEL (s), iter);
-  for (; r && r->parent && r->parent != &store (s)->root; r = r->parent) depth++;
-  return depth;
-}
-gboolean gtk_tree_store_iter_is_valid (GtkTreeStore *s, GtkTreeIter *iter) { return iter_row (GTK_TREE_MODEL (s), iter) != nullptr; }
-void gtk_tree_store_reorder (GtkTreeStore *s, GtkTreeIter *parent, gint *new_order)
-{
-  store_reorder (GTK_TREE_MODEL (s), parent ? iter_row (GTK_TREE_MODEL (s), parent) : nullptr, new_order);
-}
-void gtk_tree_store_swap (GtkTreeStore *s, GtkTreeIter *a, GtkTreeIter *b)
-{
-  Row *ra = iter_row (GTK_TREE_MODEL (s), a), *rb = iter_row (GTK_TREE_MODEL (s), b);
-  if (!ra || !rb || ra->parent != rb->parent) return;
-  StoreData *d = store (s);
-  for (auto &ad : d->adapters) if (ad) ad->relayout_begin ();
-  ra->parent->children.swapItemsAt (ra->index (), rb->index ());
-  for (auto &ad : d->adapters) if (ad) ad->relayout_end ();
-}
-void gtk_tree_store_move_before (GtkTreeStore *s, GtkTreeIter *iter, GtkTreeIter *position) { store_move_by (GTK_TREE_MODEL (s), iter, position, false); }
-void gtk_tree_store_move_after (GtkTreeStore *s, GtkTreeIter *iter, GtkTreeIter *position) { store_move_by (GTK_TREE_MODEL (s), iter, position, true); }
-
-void gtk_tree_sortable_sort_column_changed (GtkTreeSortable *sortable) { g_signal_emit_by_name (sortable, "sort-column-changed"); }
 
 /* ---------- GtkTreeSelection ---------- */
 void gtk_tree_selection_set_select_function (GtkTreeSelection *s, GtkTreeSelectionFunc func, gpointer data, GDestroyNotify destroy)
@@ -2369,12 +1821,12 @@ void gtk_tree_selection_set_select_function (GtkTreeSelection *s, GtkTreeSelecti
 }
 gboolean gtk_tree_selection_path_is_selected (GtkTreeSelection *s, GtkTreePath *path)
 {
-  GtkTreeModel *m = s->view ? gtk_tree_view_get_model (s->view) : nullptr;
-  return m && path && selected_rows (s).contains (path_row (store (m), path));
+  GtkQtItemModel *a = sel_adapter (s);
+  return a && path && selected_rows (s).contains (a->node_at (path));
 }
 void gtk_tree_selection_unselect_path (GtkTreeSelection *s, GtkTreePath *path)
 {
-  if (GtkTreeModel *m = s->view ? gtk_tree_view_get_model (s->view) : nullptr) select_row (s, path_row (store (m), path), QItemSelectionModel::Deselect);
+  if (GtkQtItemModel *a = sel_adapter (s)) select_row (s, a->node_at (path), QItemSelectionModel::Deselect);
 }
 static void select_range (GtkTreeSelection *s, GtkTreePath *a, GtkTreePath *b, QItemSelectionModel::SelectionFlag f)
 {
@@ -2460,7 +1912,7 @@ gboolean gtk_tree_view_get_path_at_pos (GtkTreeView *view, gint x, gint y, GtkTr
   QModelIndex i = tv && d && d->adapter ? tv->indexAt (QPoint (x, y)) : QModelIndex ();
   if (!i.isValid ()) return FALSE;
   QRect r = tv->visualRect (i);
-  if (path) *path = row_path (static_cast<Row *> (i.internalPointer ()));
+  if (path) *path = d->adapter->path_of (d->adapter->node (i));
   if (column) *column = i.column () < d->columns.size () ? d->columns[i.column ()] : nullptr;
   if (cell_x) *cell_x = x - r.x ();
   if (cell_y) *cell_y = y - r.y ();
@@ -2515,8 +1967,10 @@ gboolean gtk_tree_view_get_visible_range (GtkTreeView *view, GtkTreePath **start
     b = a;
     for (QModelIndex n = tv->indexBelow (b); n.isValid (); n = tv->indexBelow (n)) b = n;
   }
-  if (start) *start = row_path (static_cast<Row *> (a.internalPointer ()));
-  if (end) *end = row_path (static_cast<Row *> (b.internalPointer ()));
+  ViewData *d = vd (GTK_WIDGET (view));
+  if (!d || !d->adapter) return FALSE;
+  if (start) *start = d->adapter->path_of (d->adapter->node (a));
+  if (end) *end = d->adapter->path_of (d->adapter->node (b));
   return TRUE;
 }
 
@@ -2637,10 +2091,10 @@ gboolean gtk_tree_view_get_dest_row_at_pos (GtkTreeView *view, gint x, gint y, G
   QRect r = tv->visualRect (i);
   double f = r.height () > 0 ? double (y - r.y ()) / r.height () : 0;
   GtkTreeViewDropPosition p;
-  if (store (d->model)->is_list) p = f < 0.5 ? GTK_TREE_VIEW_DROP_BEFORE : GTK_TREE_VIEW_DROP_AFTER;
+  if (gtk_tree_model_get_flags (d->model) & GTK_TREE_MODEL_LIST_ONLY) p = f < 0.5 ? GTK_TREE_VIEW_DROP_BEFORE : GTK_TREE_VIEW_DROP_AFTER;
   else p = f < 0.25 ? GTK_TREE_VIEW_DROP_BEFORE : f < 0.5 ? GTK_TREE_VIEW_DROP_INTO_OR_BEFORE
            : f < 0.75 ? GTK_TREE_VIEW_DROP_INTO_OR_AFTER : GTK_TREE_VIEW_DROP_AFTER;
-  if (path) *path = row_path (static_cast<Row *> (i.internalPointer ()));
+  if (path) *path = d->adapter ? d->adapter->path_of (d->adapter->node (i)) : nullptr;
   if (pos) *pos = p;
   return TRUE;
 }

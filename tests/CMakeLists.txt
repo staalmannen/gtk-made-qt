@@ -83,3 +83,9 @@ set_tests_properties(rc PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen" TIMEO
 gtkqt_add_program(test-css ${CMAKE_CURRENT_SOURCE_DIR}/test-css.c 3)
 add_test(NAME css COMMAND test-css)
 set_tests_properties(css PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen" TIMEOUT 60)
+
+# tree models through the interface: sorting stores, filter and sort
+# models, chains in a view, a program's own model, row references
+gtkqt_add_program(test-treemodel ${CMAKE_CURRENT_SOURCE_DIR}/test-treemodel.c 3)
+add_test(NAME treemodel COMMAND test-treemodel)
+set_tests_properties(treemodel PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen" TIMEOUT 60)

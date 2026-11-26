@@ -32,6 +32,7 @@ set(GTKQT_SOURCES
     src/layout.cpp
     src/textlayout.cpp
     src/devices.cpp
+    src/treemodel.cpp
     src/treeview.cpp
     src/builder.cpp
     src/uimanager.cpp
