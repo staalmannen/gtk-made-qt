@@ -23,24 +23,365 @@ class GtkQtItemModel;
 /* paths and models are in treemodel.cpp; the view knows models only
  * through the GtkTreeModel interface */
 /* ======================================================================
- * Cell renderers (properties hold the current cell's values)
+ * Cell renderers: GTK's classes with their virtual functions. The stock
+ * renderers' properties hold the current cell's values; the view shows
+ * them with Qt's item painting, and they draw themselves (through Qt, onto
+ * the caller's cairo context) when a program's renderer renders them.
  * ====================================================================== */
-enum RendererKind { R_TEXT, R_TOGGLE, R_PIXBUF, R_PROGRESS, R_SPIN, R_COMBO };
+enum RendererKind { R_CUSTOM, R_TEXT, R_TOGGLE, R_PIXBUF, R_PROGRESS, R_SPIN, R_COMBO };
 struct RendererData {
-  RendererKind kind;
-  QString text, markup, foreground, background, icon_name;
+  RendererKind kind = R_CUSTOM;
+  QString text, markup, foreground, background, icon_name, font;
+  bool text_null = true;                  /* progress: "text" NULL shows the percentage */
   GdkPixbuf *pixbuf = nullptr;
-  int weight = 400, value = 0;
-  bool active = false, activatable = true, visible = true, editable = false, radio = false, sensitive = true;
-  float xalign = 0;
+  int weight = 400, value = 0, ellipsize = 0, stock_size = 1;
+  double scale = 1.0, size_points = 0;
+  bool active = false, activatable = true, editable = false, radio = false, inconsistent = false;
   ~RendererData () { if (pixbuf) g_object_unref (pixbuf); }
 };
 
 static RendererData *rd (gpointer c) { return static_cast<RendererData *> (((GtkCellRenderer *) c)->priv); }
 
+/* ---------- the stock renderers' sizes and painting, through Qt ---------- */
+static QWidget *cell_qwidget (GtkWidget *w) { return w ? gtkqt_qw (w) : nullptr; }
+
+static QFont cell_font (GtkCellRenderer *c, GtkWidget *w)
+{
+  RendererData *d = rd (c);
+  QWidget *qw = cell_qwidget (w);
+  QFont f = qw ? qw->font () : QApplication::font ();
+  if (!d->font.isEmpty ()) {
+    PangoFontDescription *pd = pango_font_description_from_string (d->font.toUtf8 ().constData ());
+    PangoFontMask set = pango_font_description_get_set_fields (pd);
+    QFont pf = gtkqt_font_from_pango (pd);
+    if (set & PANGO_FONT_MASK_FAMILY) f.setFamily (pf.family ());
+    if (set & PANGO_FONT_MASK_SIZE) f.setPointSizeF (pf.pointSizeF () > 0 ? pf.pointSizeF () : f.pointSizeF ());
+    if (set & PANGO_FONT_MASK_WEIGHT) f.setWeight (pf.weight ());
+    if (set & PANGO_FONT_MASK_STYLE) f.setItalic (pf.italic ());
+    pango_font_description_free (pd);
+  }
+  if (d->size_points > 0) f.setPointSizeF (d->size_points);
+  if (d->weight != 400) {
+#if QT_VERSION >= QT_VERSION_CHECK (6, 0, 0)
+    f.setWeight (QFont::Weight (qBound (1, d->weight, 1000)));
+#else
+    f.setWeight (d->weight >= 700 ? QFont::Bold : d->weight >= 600 ? QFont::DemiBold : d->weight < 400 ? QFont::Light : QFont::Normal);
+#endif
+  }
+  if (d->scale != 1.0 && d->scale > 0) {
+    if (f.pointSizeF () > 0) f.setPointSizeF (f.pointSizeF () * d->scale);
+    else f.setPixelSize (qMax (1, int (f.pixelSize () * d->scale)));
+  }
+  return f;
+}
+
+static QString plain_text (RendererData *d)
+{
+  if (!d->text.isEmpty () || d->markup.isEmpty ()) return d->text;
+  return QTextDocumentFragment::fromHtml (gtkqt_markup_to_html (d->markup.toUtf8 ().constData ())).toPlainText ();
+}
+
+static QPixmap cell_pixmap (GtkCellRenderer *c, GtkWidget *w)
+{
+  RendererData *d = rd (c);
+  if (d->pixbuf) return QPixmap::fromImage (gtkqt_pixbuf_image (d->pixbuf));
+  if (d->icon_name.isEmpty ()) return QPixmap ();
+  int px = gtkqt_icon_size_px ((GtkIconSize) d->stock_size);
+  QWidget *qw = cell_qwidget (w);
+  return gtkqt_icon (d->icon_name.toUtf8 ().constData ()).pixmap (QSize (px, px), qw ? qw->devicePixelRatioF () : 1.0);
+}
+
+/* the content's natural size, without padding; min_width for ellipsized text */
+static QSize builtin_content_size (GtkCellRenderer *c, GtkWidget *w, int *min_width = nullptr)
+{
+  RendererData *d = rd (c);
+  QWidget *qw = cell_qwidget (w);
+  QStyle *st = qw ? qw->style () : QApplication::style ();
+  QSize sz;
+  switch (d->kind) {
+  case R_TOGGLE: {
+    int ind = st->pixelMetric (d->radio ? QStyle::PM_ExclusiveIndicatorWidth : QStyle::PM_IndicatorWidth, nullptr, qw);
+    sz = QSize (ind, ind);
+    break;
+  }
+  case R_PIXBUF: {
+    QPixmap pm = cell_pixmap (c, w);
+    sz = pm.isNull () ? QSize (0, 0) : pm.size () / pm.devicePixelRatio ();
+    break;
+  }
+  case R_PROGRESS: {
+    QFontMetrics fm (cell_font (c, w));
+    QString t = d->text_null ? QStringLiteral ("%1 %").arg (d->value) : d->text;
+    sz = QSize (qMax (fm.horizontalAdvance (t), 60), fm.height () + 4);
+    break;
+  }
+  default: {
+    QFont f = cell_font (c, w);
+    if (d->text.isEmpty () && !d->markup.isEmpty ()) {
+      QTextDocument doc;
+      doc.setDefaultFont (f);
+      doc.setDocumentMargin (0);
+      doc.setHtml (gtkqt_markup_to_html (d->markup.toUtf8 ().constData ()));
+      sz = doc.size ().toSize ();
+    } else {
+      QFontMetrics fm (f);
+      QStringList lines = d->text.split ('\n');
+      int wmax = 0;
+      for (const QString &l : lines) wmax = qMax (wmax, fm.horizontalAdvance (l));
+      sz = QSize (wmax, fm.lineSpacing () * lines.size ());
+    }
+    if (min_width && d->ellipsize != PANGO_ELLIPSIZE_NONE) *min_width = QFontMetrics (f).horizontalAdvance (QStringLiteral ("…"));
+    break;
+  }
+  }
+  if (min_width && (d->kind != R_TEXT && d->kind != R_SPIN && d->kind != R_COMBO || d->ellipsize == PANGO_ELLIPSIZE_NONE))
+    *min_width = sz.width ();
+  return sz;
+}
+
+static void builtin_paint (GtkCellRenderer *c, QPainter *p, GtkWidget *w, const QRect &area, GtkCellRendererState flags)
+{
+  RendererData *d = rd (c);
+  QWidget *qw = cell_qwidget (w);
+  QStyle *st = qw ? qw->style () : QApplication::style ();
+  QPalette pal = qw ? qw->palette () : QApplication::palette ();
+  bool sensitive = c->sensitive && !(flags & GTK_CELL_RENDERER_INSENSITIVE);
+  bool selected = flags & GTK_CELL_RENDERER_SELECTED;
+  pal.setCurrentColorGroup (sensitive ? QPalette::Active : QPalette::Disabled);
+  if (c->cell_background_set && !d->background.isEmpty ()) p->fillRect (area, QColor (d->background));
+  QRect r = area.adjusted (c->xpad, c->ypad, -c->xpad, -c->ypad);
+  if (r.width () <= 0 || r.height () <= 0) return;
+  QSize content = builtin_content_size (c, w);
+  auto aligned = [&] (QSize sz) {
+    int x = r.x () + qRound (c->xalign * qMax (0, r.width () - sz.width ()));
+    int y = r.y () + qRound (c->yalign * qMax (0, r.height () - sz.height ()));
+    return QRect (QPoint (x, y), sz.boundedTo (r.size ()));
+  };
+  switch (d->kind) {
+  case R_TOGGLE: {
+    QStyleOptionButton o;
+    if (qw) o.initFrom (qw);
+    o.rect = aligned (content);
+    o.state = (sensitive ? QStyle::State_Enabled : QStyle::State_None)
+              | (d->inconsistent ? QStyle::State_NoChange : d->active ? QStyle::State_On : QStyle::State_Off);
+    st->drawPrimitive (d->radio ? QStyle::PE_IndicatorRadioButton : QStyle::PE_IndicatorCheckBox, &o, p, qw);
+    break;
+  }
+  case R_PIXBUF: {
+    QPixmap pm = cell_pixmap (c, w);
+    if (pm.isNull ()) break;
+    if (!sensitive) pm = st->generatedIconPixmap (QIcon::Disabled, pm, nullptr);
+    p->drawPixmap (aligned (pm.size () / pm.devicePixelRatio ()), pm);
+    break;
+  }
+  case R_PROGRESS: {
+    QStyleOptionProgressBar bar;
+    if (qw) bar.initFrom (qw);
+    bar.state = (sensitive ? QStyle::State_Enabled : QStyle::State_None) | QStyle::State_Horizontal;
+    bar.rect = r;
+    bar.minimum = 0;
+    bar.maximum = 100;
+    bar.progress = qBound (0, d->value, 100);
+    bar.text = d->text_null ? QStringLiteral ("%1 %").arg (d->value) : d->text;
+    bar.textVisible = !bar.text.isEmpty ();
+    bar.palette = pal;
+    st->drawControl (QStyle::CE_ProgressBar, &bar, p, qw);
+    break;
+  }
+  default: {
+    QFont f = cell_font (c, w);
+    QColor fg = !d->foreground.isEmpty () ? QColor (d->foreground)
+                : pal.color (selected ? QPalette::HighlightedText : QPalette::Text);
+    p->save ();
+    p->setClipRect (r);
+    if (d->text.isEmpty () && !d->markup.isEmpty ()) {
+      QTextDocument doc;
+      doc.setDefaultFont (f);
+      doc.setDocumentMargin (0);
+      doc.setDefaultStyleSheet (QStringLiteral ("body { color: %1; }").arg (fg.name ()));
+      doc.setHtml (QStringLiteral ("<body>") + gtkqt_markup_to_html (d->markup.toUtf8 ().constData ()) + QStringLiteral ("</body>"));
+      QRect t = aligned (doc.size ().toSize ());
+      p->translate (t.topLeft ());
+      doc.drawContents (p);
+    } else {
+      p->setFont (f);
+      p->setPen (fg);
+      QFontMetrics fm (f);
+      QString text = d->text;
+      if (d->ellipsize != PANGO_ELLIPSIZE_NONE && !text.contains ('\n') && fm.horizontalAdvance (text) > r.width ()) {
+        Qt::TextElideMode mode = d->ellipsize == PANGO_ELLIPSIZE_START ? Qt::ElideLeft
+                                 : d->ellipsize == PANGO_ELLIPSIZE_MIDDLE ? Qt::ElideMiddle : Qt::ElideRight;
+        text = fm.elidedText (text, mode, r.width ());
+      }
+      QStringList lines = text.split ('\n');
+      int wmax = 0;
+      for (const QString &l : lines) wmax = qMax (wmax, fm.horizontalAdvance (l));
+      QRect t = aligned (QSize (wmax, fm.lineSpacing () * lines.size ()));
+      Qt::Alignment h = c->xalign > 0.75 ? Qt::AlignRight : c->xalign > 0.25 ? Qt::AlignHCenter : Qt::AlignLeft;
+      p->drawText (QRect (t.x (), t.y (), qMax (wmax, t.width ()), t.height () + fm.descent ()), h | Qt::AlignTop, text);
+    }
+    p->restore ();
+    break;
+  }
+  }
+}
+
+/* paint on a cairo context through a Qt image */
+static void paint_on_cairo (cairo_t *cr, const QRect &area, qreal dpr, const std::function<void (QPainter *, const QRect &)> &paint)
+{
+  if (area.width () <= 0 || area.height () <= 0) return;
+  QImage img (QSize (qCeil (area.width () * dpr), qCeil (area.height () * dpr)), QImage::Format_ARGB32_Premultiplied);
+  img.setDevicePixelRatio (dpr);
+  img.fill (Qt::transparent);
+  {
+    QPainter p (&img);
+    p.setRenderHint (QPainter::Antialiasing);
+    paint (&p, QRect (QPoint (0, 0), area.size ()));
+  }
+  cairo_surface_t *surf = cairo_image_surface_create_for_data (img.bits (), CAIRO_FORMAT_ARGB32, img.width (), img.height (),
+                                                               img.bytesPerLine ());
+  cairo_surface_set_device_scale (surf, dpr, dpr);
+  cairo_save (cr);
+  cairo_set_source_surface (cr, surf, area.x (), area.y ());
+  cairo_rectangle (cr, area.x (), area.y (), area.width (), area.height ());
+  cairo_fill (cr);
+  cairo_restore (cr);
+  cairo_surface_destroy (surf);
+}
+
+static qreal widget_dpr (GtkWidget *w)
+{
+  QWidget *qw = cell_qwidget (w);
+  return qw ? qw->devicePixelRatioF () : qApp ? qApp->devicePixelRatio () : 1.0;
+}
+
+/* the stock renderers' class functions */
+static void builtin_render (GtkCellRenderer *c, cairo_t *cr, GtkWidget *w, const GdkRectangle *, const GdkRectangle *area,
+                            GtkCellRendererState flags)
+{
+  if (!area) return;
+  paint_on_cairo (cr, QRect (area->x, area->y, area->width, area->height), widget_dpr (w),
+                  [&] (QPainter *p, const QRect &r) { builtin_paint (c, p, w, r, flags); });
+}
+/* the same, for GTK 2 programs: their render functions take a GdkDrawable */
+static void builtin_render2 (GtkCellRenderer *c, GdkDrawable *window, GtkWidget *w, GdkRectangle *bg, GdkRectangle *area,
+                             GdkRectangle *, GtkCellRendererState flags)
+{
+  cairo_t *cr = gdk_cairo_create (window);
+  builtin_render (c, cr, w, bg, area, flags);
+  cairo_destroy (cr);
+}
+typedef void (*Render2Func) (GtkCellRenderer *, GdkDrawable *, GtkWidget *, GdkRectangle *, GdkRectangle *, GdkRectangle *,
+                             GtkCellRendererState);
+typedef void (*Render3Func) (GtkCellRenderer *, cairo_t *, GtkWidget *, const GdkRectangle *, const GdkRectangle *,
+                             GtkCellRendererState);
+
+static void builtin_get_size (GtkCellRenderer *c, GtkWidget *w, const GdkRectangle *area, gint *x_off, gint *y_off, gint *width,
+                              gint *height)
+{
+  QSize sz = builtin_content_size (c, w) + QSize (2 * c->xpad, 2 * c->ypad);
+  if (c->width >= 0) sz.setWidth (c->width);
+  if (c->height >= 0) sz.setHeight (c->height);
+  if (width) *width = sz.width ();
+  if (height) *height = sz.height ();
+  if (area) {
+    if (x_off) *x_off = qMax (0, qRound (c->xalign * (area->width - sz.width ())));
+    if (y_off) *y_off = qMax (0, qRound (c->yalign * (area->height - sz.height ())));
+  } else {
+    if (x_off) *x_off = 0;
+    if (y_off) *y_off = 0;
+  }
+}
+static void builtin_pref_width (GtkCellRenderer *c, GtkWidget *w, gint *min, gint *nat)
+{
+  int mw = 0;
+  QSize sz = builtin_content_size (c, w, &mw);
+  int pad = 2 * c->xpad;
+  if (c->width >= 0) { if (min) *min = c->width; if (nat) *nat = c->width; return; }
+  if (min) *min = mw + pad;
+  if (nat) *nat = sz.width () + pad;
+}
+
+static bool builtin_renders (GtkCellRenderer *c)
+{
+  auto r = (gpointer) GTK_CELL_RENDERER_GET_CLASS (c)->render;
+  return r == (gpointer) builtin_render || r == (gpointer) builtin_render2;
+}
+
+/* a cell the view cannot show with Qt's painting */
+static bool renders_itself (GtkCellRenderer *c)
+{
+  return GTK_CELL_RENDERER_GET_CLASS (c)->render && !builtin_renders (c);
+}
+
+/* render with the class's function, whichever generation it is */
+static void call_render (GtkCellRenderer *c, cairo_t *cr, GtkWidget *w, const GdkRectangle *bg, const GdkRectangle *area,
+                         GtkCellRendererState flags)
+{
+  GtkCellRendererClass *k = GTK_CELL_RENDERER_GET_CLASS (c);
+  if (!k->render || !c->visible) return;
+  if (builtin_renders (c)) { builtin_render (c, cr, w, bg, area, flags); return; }
+  if (gtkqt_api >= 3) { ((Render3Func) (gpointer) k->render) (c, cr, w, bg, area, flags); return; }
+  /* a GTK 2 renderer: onto a pixmap of the area, then onto cr */
+  if (!area || area->width <= 0 || area->height <= 0) return;
+  GdkPixmap *pm = gdk_pixmap_new (nullptr, area->width, area->height, 24);
+  cairo_t *pcr = gdk_cairo_create (pm);
+  QWidget *qw = cell_qwidget (w);
+  QColor base = (qw ? qw->palette () : QApplication::palette ()).color ((flags & GTK_CELL_RENDERER_SELECTED) ? QPalette::Highlight : QPalette::Base);
+  cairo_set_source_rgb (pcr, base.redF (), base.greenF (), base.blueF ());
+  cairo_paint (pcr);
+  cairo_destroy (pcr);
+  GdkRectangle local = { 0, 0, area->width, area->height };
+  ((Render2Func) (gpointer) k->render) (c, pm, w, &local, &local, &local, flags);
+  GdkPixbuf *pb = gdk_pixbuf_get_from_drawable (nullptr, pm, nullptr, 0, 0, 0, 0, area->width, area->height);
+  if (pb) {
+    cairo_save (cr);
+    gdk_cairo_set_source_pixbuf (cr, pb, area->x, area->y);
+    cairo_rectangle (cr, area->x, area->y, area->width, area->height);
+    cairo_fill (cr);
+    cairo_restore (cr);
+    g_object_unref (pb);
+  }
+  g_object_unref (pm);
+}
+
+/* ---------- GtkCellRenderer ---------- */
 G_DEFINE_TYPE (GtkCellRenderer, gtk_cell_renderer, G_TYPE_INITIALLY_UNOWNED)
-static void gtk_cell_renderer_init (GtkCellRenderer *c) { c->priv = new RendererData; }
+static void gtk_cell_renderer_init (GtkCellRenderer *c)
+{
+  c->priv = new RendererData;
+  c->xalign = c->yalign = 0.5f;
+  c->width = c->height = -1;
+  c->visible = c->sensitive = 1;
+}
 static void renderer_finalize (GObject *o) { delete rd (o); G_OBJECT_CLASS (gtk_cell_renderer_parent_class)->finalize (o); }
+
+/* the base class's sizes come from get_size, as GTK 3's do */
+static GtkSizeRequestMode base_request_mode (GtkCellRenderer *) { return GTK_SIZE_REQUEST_HEIGHT_FOR_WIDTH; }
+static void base_pref_width (GtkCellRenderer *c, GtkWidget *w, gint *min, gint *nat)
+{
+  gint wd = 0;
+  if (GTK_CELL_RENDERER_GET_CLASS (c)->get_size) GTK_CELL_RENDERER_GET_CLASS (c)->get_size (c, w, nullptr, nullptr, nullptr, &wd, nullptr);
+  if (c->width >= 0) wd = c->width;
+  if (min) *min = wd;
+  if (nat) *nat = wd;
+}
+static void base_pref_height (GtkCellRenderer *c, GtkWidget *w, gint *min, gint *nat)
+{
+  gint h = 0;
+  if (GTK_CELL_RENDERER_GET_CLASS (c)->get_size) GTK_CELL_RENDERER_GET_CLASS (c)->get_size (c, w, nullptr, nullptr, nullptr, nullptr, &h);
+  if (c->height >= 0) h = c->height;
+  if (min) *min = h;
+  if (nat) *nat = h;
+}
+static void base_height_for_width (GtkCellRenderer *c, GtkWidget *w, gint, gint *min, gint *nat)
+{
+  GTK_CELL_RENDERER_GET_CLASS (c)->get_preferred_height (c, w, min, nat);
+}
+static void base_width_for_height (GtkCellRenderer *c, GtkWidget *w, gint, gint *min, gint *nat)
+{
+  GTK_CELL_RENDERER_GET_CLASS (c)->get_preferred_width (c, w, min, nat);
+}
 
 #define RSTR(name, field) \
   gtkqt_prop (klass, g_param_spec_string (name, nullptr, nullptr, nullptr, RW), \
@@ -50,104 +391,387 @@ static void renderer_finalize (GObject *o) { delete rd (o); G_OBJECT_CLASS (gtk_
   gtkqt_prop (klass, g_param_spec_boolean (name, nullptr, nullptr, FALSE, RW), \
               [] (GObject *o, const GValue *v) { rd (o)->field = g_value_get_boolean (v); }, \
               [] (GObject *o, GValue *v) { g_value_set_boolean (v, rd (o)->field); })
+#define RIGNORE_BOOL(name) \
+  gtkqt_prop (klass, g_param_spec_boolean (name, nullptr, nullptr, FALSE, RW), [] (GObject *, const GValue *) {}, nullptr)
+
+static QString color_name (const GdkRGBA *c) { return c ? QColor::fromRgbF (c->red, c->green, c->blue, c->alpha).name (QColor::HexArgb) : QString (); }
+static QString gdk_color_name (const GdkColor *c) { return c ? QColor (c->red >> 8, c->green >> 8, c->blue >> 8).name () : QString (); }
 
 static void gtk_cell_renderer_class_init (GtkCellRendererClass *klass)
 {
   G_OBJECT_CLASS (klass)->finalize = renderer_finalize;
+  klass->get_request_mode = base_request_mode;
+  klass->get_preferred_width = base_pref_width;
+  klass->get_preferred_height = base_pref_height;
+  klass->get_preferred_height_for_width = base_height_for_width;
+  klass->get_preferred_width_for_height = base_width_for_height;
+  gtkqt_prop (klass, g_param_spec_boolean ("visible", nullptr, nullptr, TRUE, RW),
+              [] (GObject *o, const GValue *v) { ((GtkCellRenderer *) o)->visible = g_value_get_boolean (v); },
+              [] (GObject *o, GValue *v) { g_value_set_boolean (v, ((GtkCellRenderer *) o)->visible); });
+  gtkqt_prop (klass, g_param_spec_boolean ("sensitive", nullptr, nullptr, TRUE, RW),
+              [] (GObject *o, const GValue *v) { ((GtkCellRenderer *) o)->sensitive = g_value_get_boolean (v); },
+              [] (GObject *o, GValue *v) { g_value_set_boolean (v, ((GtkCellRenderer *) o)->sensitive); });
+  gtkqt_prop (klass, g_param_spec_float ("xalign", nullptr, nullptr, 0, 1, 0.5, RW),
+              [] (GObject *o, const GValue *v) { ((GtkCellRenderer *) o)->xalign = g_value_get_float (v); },
+              [] (GObject *o, GValue *v) { g_value_set_float (v, ((GtkCellRenderer *) o)->xalign); });
+  gtkqt_prop (klass, g_param_spec_float ("yalign", nullptr, nullptr, 0, 1, 0.5, RW),
+              [] (GObject *o, const GValue *v) { ((GtkCellRenderer *) o)->yalign = g_value_get_float (v); },
+              [] (GObject *o, GValue *v) { g_value_set_float (v, ((GtkCellRenderer *) o)->yalign); });
+  gtkqt_prop (klass, g_param_spec_uint ("xpad", nullptr, nullptr, 0, G_MAXUINT16, 0, RW),
+              [] (GObject *o, const GValue *v) { ((GtkCellRenderer *) o)->xpad = g_value_get_uint (v); },
+              [] (GObject *o, GValue *v) { g_value_set_uint (v, ((GtkCellRenderer *) o)->xpad); });
+  gtkqt_prop (klass, g_param_spec_uint ("ypad", nullptr, nullptr, 0, G_MAXUINT16, 0, RW),
+              [] (GObject *o, const GValue *v) { ((GtkCellRenderer *) o)->ypad = g_value_get_uint (v); },
+              [] (GObject *o, GValue *v) { g_value_set_uint (v, ((GtkCellRenderer *) o)->ypad); });
+  gtkqt_prop (klass, g_param_spec_int ("width", nullptr, nullptr, -1, G_MAXINT, -1, RW),
+              [] (GObject *o, const GValue *v) { ((GtkCellRenderer *) o)->width = g_value_get_int (v); },
+              [] (GObject *o, GValue *v) { g_value_set_int (v, ((GtkCellRenderer *) o)->width); });
+  gtkqt_prop (klass, g_param_spec_int ("height", nullptr, nullptr, -1, G_MAXINT, -1, RW),
+              [] (GObject *o, const GValue *v) { ((GtkCellRenderer *) o)->height = g_value_get_int (v); },
+              [] (GObject *o, GValue *v) { g_value_set_int (v, ((GtkCellRenderer *) o)->height); });
+  gtkqt_prop (klass, g_param_spec_int ("mode", nullptr, nullptr, 0, 2, 0, RW),
+              [] (GObject *o, const GValue *v) { ((GtkCellRenderer *) o)->mode = g_value_get_int (v); },
+              [] (GObject *o, GValue *v) { g_value_set_int (v, ((GtkCellRenderer *) o)->mode); });
+  gtkqt_prop (klass, g_param_spec_boolean ("is-expander", nullptr, nullptr, FALSE, RW),
+              [] (GObject *o, const GValue *v) { ((GtkCellRenderer *) o)->is_expander = g_value_get_boolean (v); }, nullptr);
+  gtkqt_prop (klass, g_param_spec_boolean ("is-expanded", nullptr, nullptr, FALSE, RW),
+              [] (GObject *o, const GValue *v) { ((GtkCellRenderer *) o)->is_expanded = g_value_get_boolean (v); }, nullptr);
+  gtkqt_prop (klass, g_param_spec_string ("cell-background", nullptr, nullptr, nullptr, RW),
+              [] (GObject *o, const GValue *v) {
+                rd (o)->background = gtkqt_str (g_value_get_string (v));
+                ((GtkCellRenderer *) o)->cell_background_set = g_value_get_string (v) != nullptr;
+              }, nullptr);
+  gtkqt_prop (klass, g_param_spec_boxed ("cell-background-gdk", nullptr, nullptr, GDK_TYPE_COLOR, RW),
+              [] (GObject *o, const GValue *v) {
+                rd (o)->background = gdk_color_name ((GdkColor *) g_value_get_boxed (v));
+                ((GtkCellRenderer *) o)->cell_background_set = g_value_get_boxed (v) != nullptr;
+              }, nullptr);
+  gtkqt_prop (klass, g_param_spec_boxed ("cell-background-rgba", nullptr, nullptr, GDK_TYPE_RGBA, RW),
+              [] (GObject *o, const GValue *v) {
+                rd (o)->background = color_name ((GdkRGBA *) g_value_get_boxed (v));
+                ((GtkCellRenderer *) o)->cell_background_set = g_value_get_boxed (v) != nullptr;
+              }, nullptr);
+  gtkqt_prop (klass, g_param_spec_boolean ("cell-background-set", nullptr, nullptr, FALSE, RW),
+              [] (GObject *o, const GValue *v) { ((GtkCellRenderer *) o)->cell_background_set = g_value_get_boolean (v); },
+              [] (GObject *o, GValue *v) { g_value_set_boolean (v, ((GtkCellRenderer *) o)->cell_background_set); });
+  gtkqt_prop (klass, g_param_spec_boolean ("editing", nullptr, nullptr, FALSE, G_PARAM_READABLE),
+              nullptr, [] (GObject *o, GValue *v) { g_value_set_boolean (v, ((GtkCellRenderer *) o)->editing); });
+  g_signal_new ("editing-canceled", G_TYPE_FROM_CLASS (klass), G_SIGNAL_RUN_FIRST,
+                G_STRUCT_OFFSET (GtkCellRendererClass, editing_canceled), nullptr, nullptr, nullptr, G_TYPE_NONE, 0);
+  g_signal_new ("editing-started", G_TYPE_FROM_CLASS (klass), G_SIGNAL_RUN_FIRST,
+                G_STRUCT_OFFSET (GtkCellRendererClass, editing_started), nullptr, nullptr, nullptr, G_TYPE_NONE, 2,
+                G_TYPE_OBJECT, G_TYPE_STRING);
+}
+
+/* ---------- the stock renderers ---------- */
+static void stock_class_init (GtkCellRendererClass *klass)
+{
+  /* GTK 2 programs chain up with a GdkDrawable */
+  klass->render = (decltype (klass->render)) (gpointer) (gtkqt_api <= 2 ? (gpointer) builtin_render2 : (gpointer) builtin_render);
+  klass->get_size = builtin_get_size;
+  klass->get_preferred_width = builtin_pref_width;
+}
+
+static void text_class_init (GtkCellRendererClass *klass)
+{
+  stock_class_init (klass);
   RSTR ("text", text);
   RSTR ("markup", markup);
-  RSTR ("foreground", foreground);
-  RSTR ("background", background);
-  RSTR ("cell-background", background);
-  RSTR ("icon-name", icon_name);
-  RSTR ("stock-id", icon_name);
+  RSTR ("font", font);
+  RBOOL ("editable", editable);
+  g_signal_new ("edited", G_TYPE_FROM_CLASS (klass), G_SIGNAL_RUN_LAST, 0, nullptr, nullptr, nullptr, G_TYPE_NONE, 2, G_TYPE_STRING, G_TYPE_STRING);
+  gtkqt_prop (klass, g_param_spec_string ("foreground", nullptr, nullptr, nullptr, RW),
+              [] (GObject *o, const GValue *v) { rd (o)->foreground = gtkqt_str (g_value_get_string (v)); }, nullptr);
+  gtkqt_prop (klass, g_param_spec_string ("background", nullptr, nullptr, nullptr, RW),
+              [] (GObject *o, const GValue *v) {
+                rd (o)->background = gtkqt_str (g_value_get_string (v));
+                ((GtkCellRenderer *) o)->cell_background_set = g_value_get_string (v) != nullptr;
+              }, nullptr);
+  gtkqt_prop (klass, g_param_spec_boxed ("foreground-rgba", nullptr, nullptr, GDK_TYPE_RGBA, RW),
+              [] (GObject *o, const GValue *v) { rd (o)->foreground = color_name ((GdkRGBA *) g_value_get_boxed (v)); }, nullptr);
+  gtkqt_prop (klass, g_param_spec_boxed ("background-rgba", nullptr, nullptr, GDK_TYPE_RGBA, RW),
+              [] (GObject *o, const GValue *v) {
+                rd (o)->background = color_name ((GdkRGBA *) g_value_get_boxed (v));
+                ((GtkCellRenderer *) o)->cell_background_set = g_value_get_boxed (v) != nullptr;
+              }, nullptr);
+  gtkqt_prop (klass, g_param_spec_boxed ("foreground-gdk", nullptr, nullptr, GDK_TYPE_COLOR, RW),
+              [] (GObject *o, const GValue *v) { rd (o)->foreground = gdk_color_name ((GdkColor *) g_value_get_boxed (v)); }, nullptr);
+  gtkqt_prop (klass, g_param_spec_boxed ("background-gdk", nullptr, nullptr, GDK_TYPE_COLOR, RW),
+              [] (GObject *o, const GValue *v) {
+                rd (o)->background = gdk_color_name ((GdkColor *) g_value_get_boxed (v));
+                ((GtkCellRenderer *) o)->cell_background_set = g_value_get_boxed (v) != nullptr;
+              }, nullptr);
+  gtkqt_prop (klass, g_param_spec_boxed ("font-desc", nullptr, nullptr, PANGO_TYPE_FONT_DESCRIPTION, RW),
+              [] (GObject *o, const GValue *v) {
+                auto *fd = (PangoFontDescription *) g_value_get_boxed (v);
+                gchar *str = fd ? pango_font_description_to_string (fd) : nullptr;
+                rd (o)->font = gtkqt_str (str);
+                g_free (str);
+              }, nullptr);
+  gtkqt_prop (klass, g_param_spec_string ("family", nullptr, nullptr, nullptr, RW),
+              [] (GObject *o, const GValue *v) { if (g_value_get_string (v)) rd (o)->font = gtkqt_str (g_value_get_string (v)); }, nullptr);
+  gtkqt_prop (klass, g_param_spec_double ("scale", nullptr, nullptr, 0, G_MAXDOUBLE, 1, RW),
+              [] (GObject *o, const GValue *v) { rd (o)->scale = g_value_get_double (v); },
+              [] (GObject *o, GValue *v) { g_value_set_double (v, rd (o)->scale); });
+  gtkqt_prop (klass, g_param_spec_double ("size-points", nullptr, nullptr, 0, G_MAXDOUBLE, 0, RW),
+              [] (GObject *o, const GValue *v) { rd (o)->size_points = g_value_get_double (v); }, nullptr);
+  gtkqt_prop (klass, g_param_spec_int ("size", nullptr, nullptr, 0, G_MAXINT, 0, RW),
+              [] (GObject *o, const GValue *v) { rd (o)->size_points = g_value_get_int (v) / (double) PANGO_SCALE; }, nullptr);
+  gtkqt_prop (klass, g_param_spec_int ("weight", nullptr, nullptr, 0, 1000, 400, RW),
+              [] (GObject *o, const GValue *v) { rd (o)->weight = g_value_get_int (v); },
+              [] (GObject *o, GValue *v) { g_value_set_int (v, rd (o)->weight); });
+  gtkqt_prop (klass, g_param_spec_enum ("ellipsize", nullptr, nullptr, PANGO_TYPE_ELLIPSIZE_MODE, PANGO_ELLIPSIZE_NONE, RW),
+              [] (GObject *o, const GValue *v) { rd (o)->ellipsize = g_value_get_enum (v); },
+              [] (GObject *o, GValue *v) { g_value_set_enum (v, rd (o)->ellipsize); });
+  /* accepted; Qt's item painting decides */
+  for (const char *name : { "wrap-width", "width-chars", "max-width-chars", "rise", "stretch", "style", "variant" })
+    gtkqt_prop (klass, g_param_spec_int (name, nullptr, nullptr, -G_MAXINT, G_MAXINT, 0, RW), [] (GObject *, const GValue *) {}, nullptr);
+  for (const char *name : { "foreground-set", "background-set", "weight-set", "ellipsize-set", "strikethrough", "underline-set",
+                            "style-set", "family-set", "size-set", "scale-set", "single-paragraph-mode", "editable-set" })
+    RIGNORE_BOOL (name);
+}
+
+static void toggle_class_init (GtkCellRendererClass *klass)
+{
+  stock_class_init (klass);
   RBOOL ("active", active);
   RBOOL ("activatable", activatable);
-  RBOOL ("visible", visible);
-  RBOOL ("editable", editable);
   RBOOL ("radio", radio);
-  RBOOL ("sensitive", sensitive);
-  gtkqt_prop (klass, g_param_spec_int ("weight", nullptr, nullptr, 0, 1000, 400, RW),
-              [] (GObject *o, const GValue *v) { rd (o)->weight = g_value_get_int (v); }, nullptr);
-  gtkqt_prop (klass, g_param_spec_int ("value", nullptr, nullptr, 0, 100, 0, RW),
-              [] (GObject *o, const GValue *v) { rd (o)->value = g_value_get_int (v); }, nullptr);
-  gtkqt_prop (klass, g_param_spec_float ("xalign", nullptr, nullptr, 0, 1, 0, RW),
-              [] (GObject *o, const GValue *v) { rd (o)->xalign = g_value_get_float (v); }, nullptr);
+  RBOOL ("inconsistent", inconsistent);
+  gtkqt_prop (klass, g_param_spec_int ("indicator-size", nullptr, nullptr, 0, G_MAXINT, 16, RW), [] (GObject *, const GValue *) {}, nullptr);
+  g_signal_new ("toggled", G_TYPE_FROM_CLASS (klass), G_SIGNAL_RUN_LAST, 0, nullptr, nullptr, nullptr, G_TYPE_NONE, 1, G_TYPE_STRING);
+}
+
+static void pixbuf_class_init (GtkCellRendererClass *klass)
+{
+  stock_class_init (klass);
+  RSTR ("icon-name", icon_name);
+  RSTR ("stock-id", icon_name);
   gtkqt_prop (klass, g_param_spec_object ("pixbuf", nullptr, nullptr, GDK_TYPE_PIXBUF, RW),
               [] (GObject *o, const GValue *v) {
                 RendererData *d = rd (o);
                 if (d->pixbuf) g_object_unref (d->pixbuf);
                 d->pixbuf = (GdkPixbuf *) g_value_dup_object (v);
-              }, nullptr);
-  gtkqt_prop (klass, g_param_spec_boxed ("foreground-rgba", nullptr, nullptr, GDK_TYPE_RGBA, RW),
+              },
+              [] (GObject *o, GValue *v) { g_value_set_object (v, rd (o)->pixbuf); });
+  gtkqt_prop (klass, g_param_spec_uint ("stock-size", nullptr, nullptr, 0, G_MAXUINT, 1, RW),
+              [] (GObject *o, const GValue *v) { rd (o)->stock_size = g_value_get_uint (v); }, nullptr);
+  gtkqt_prop (klass, g_param_spec_object ("gicon", nullptr, nullptr, G_TYPE_ICON, RW),
               [] (GObject *o, const GValue *v) {
-                auto *c = (GdkRGBA *) g_value_get_boxed (v);
-                rd (o)->foreground = c ? QColor::fromRgbF (c->red, c->green, c->blue, c->alpha).name (QColor::HexArgb) : QString ();
+                auto *icon = (GIcon *) g_value_get_object (v);
+                const gchar *const *names = icon && G_IS_THEMED_ICON (icon) ? g_themed_icon_get_names (G_THEMED_ICON (icon)) : nullptr;
+                rd (o)->icon_name = names && names[0] ? gtkqt_str (names[0]) : QString ();
               }, nullptr);
-  /* GTK 2 colours (GdkColor) */
-  gtkqt_prop (klass, g_param_spec_boxed ("foreground-gdk", nullptr, nullptr, GDK_TYPE_COLOR, RW),
-              [] (GObject *o, const GValue *v) {
-                auto *c = (GdkColor *) g_value_get_boxed (v);
-                rd (o)->foreground = c ? QColor (c->red >> 8, c->green >> 8, c->blue >> 8).name () : QString ();
-              }, nullptr);
-  gtkqt_prop (klass, g_param_spec_boxed ("background-gdk", nullptr, nullptr, GDK_TYPE_COLOR, RW),
-              [] (GObject *o, const GValue *v) {
-                auto *c = (GdkColor *) g_value_get_boxed (v);
-                rd (o)->background = c ? QColor (c->red >> 8, c->green >> 8, c->blue >> 8).name () : QString ();
-              }, nullptr);
-  gtkqt_prop (klass, g_param_spec_boxed ("cell-background-gdk", nullptr, nullptr, GDK_TYPE_COLOR, RW),
-              [] (GObject *o, const GValue *v) {
-                auto *c = (GdkColor *) g_value_get_boxed (v);
-                rd (o)->background = c ? QColor (c->red >> 8, c->green >> 8, c->blue >> 8).name () : QString ();
-              }, nullptr);
-  /* accepted; the view's rows have Qt's padding and eliding */
-  for (const char *name : { "xpad", "ypad", "width", "height", "ellipsize", "wrap-width", "size", "mode" })
-    gtkqt_prop (klass, g_param_spec_int (name, nullptr, nullptr, -1, G_MAXINT, 0, RW), [] (GObject *, const GValue *) {}, nullptr);
-  gtkqt_prop (klass, g_param_spec_float ("yalign", nullptr, nullptr, 0, 1, 0.5, RW), [] (GObject *, const GValue *) {}, nullptr);
-  for (const char *name : { "foreground-set", "background-set", "cell-background-set", "weight-set", "ellipsize-set",
-                            "is-expander", "is-expanded", "strikethrough", "underline-set", "style-set" })
-    gtkqt_prop (klass, g_param_spec_boolean (name, nullptr, nullptr, FALSE, RW), [] (GObject *, const GValue *) {}, nullptr);
-  g_signal_new ("edited", G_TYPE_FROM_CLASS (klass), G_SIGNAL_RUN_LAST, 0, nullptr, nullptr, nullptr, G_TYPE_NONE, 2, G_TYPE_STRING, G_TYPE_STRING);
-  g_signal_new ("toggled", G_TYPE_FROM_CLASS (klass), G_SIGNAL_RUN_LAST, 0, nullptr, nullptr, nullptr, G_TYPE_NONE, 1, G_TYPE_STRING);
+  for (const char *name : { "follow-state", "pixbuf-expander-open-set" }) RIGNORE_BOOL (name);
 }
 
-static GType renderer_subtype (const char *name)
+static void progress_class_init (GtkCellRendererClass *klass)
 {
-  return g_type_register_static_simple (GTK_TYPE_CELL_RENDERER, g_intern_static_string (name), sizeof (GtkCellRendererClass),
-                                        nullptr, sizeof (GtkCellRenderer), nullptr, (GTypeFlags) 0);
+  stock_class_init (klass);
+  gtkqt_prop (klass, g_param_spec_int ("value", nullptr, nullptr, 0, 100, 0, RW),
+              [] (GObject *o, const GValue *v) { rd (o)->value = g_value_get_int (v); },
+              [] (GObject *o, GValue *v) { g_value_set_int (v, rd (o)->value); });
+  gtkqt_prop (klass, g_param_spec_string ("text", nullptr, nullptr, nullptr, RW),
+              [] (GObject *o, const GValue *v) {
+                rd (o)->text = gtkqt_str (g_value_get_string (v));
+                rd (o)->text_null = g_value_get_string (v) == nullptr;
+              },
+              [] (GObject *o, GValue *v) { g_value_set_string (v, rd (o)->text_null ? nullptr : rd (o)->text.toUtf8 ().constData ()); });
+  gtkqt_prop (klass, g_param_spec_int ("pulse", nullptr, nullptr, -1, G_MAXINT, -1, RW), [] (GObject *, const GValue *) {}, nullptr);
+  gtkqt_prop (klass, g_param_spec_float ("text-xalign", nullptr, nullptr, 0, 1, 0.5, RW), [] (GObject *, const GValue *) {}, nullptr);
+  gtkqt_prop (klass, g_param_spec_float ("text-yalign", nullptr, nullptr, 0, 1, 0.5, RW), [] (GObject *, const GValue *) {}, nullptr);
+  RIGNORE_BOOL ("inverted");
 }
 
-static GtkCellRenderer *renderer_new (GType t, RendererKind kind)
+static void combo_class_init (GtkCellRendererClass *klass)
 {
-  auto *c = (GtkCellRenderer *) g_object_new (t, nullptr);
-  rd (c)->kind = kind;
-  if (kind == R_PROGRESS) rd (c)->xalign = 0.5f;
-  return c;
+  gtkqt_prop (klass, g_param_spec_object ("model", nullptr, nullptr, GTK_TYPE_TREE_MODEL, RW), [] (GObject *, const GValue *) {}, nullptr);
+  gtkqt_prop (klass, g_param_spec_int ("text-column", nullptr, nullptr, -1, G_MAXINT, -1, RW), [] (GObject *, const GValue *) {}, nullptr);
+  RIGNORE_BOOL ("has-entry");
+}
+static void spin_class_init (GtkCellRendererClass *klass)
+{
+  gtkqt_prop (klass, g_param_spec_object ("adjustment", nullptr, nullptr, GTK_TYPE_ADJUSTMENT, RW), [] (GObject *, const GValue *) {}, nullptr);
+  gtkqt_prop (klass, g_param_spec_double ("climb-rate", nullptr, nullptr, 0, G_MAXDOUBLE, 0, RW), [] (GObject *, const GValue *) {}, nullptr);
+  gtkqt_prop (klass, g_param_spec_uint ("digits", nullptr, nullptr, 0, 20, 0, RW), [] (GObject *, const GValue *) {}, nullptr);
+}
+
+static void text_init (GtkCellRenderer *c) { rd (c)->kind = R_TEXT; c->xalign = 0; c->xpad = c->ypad = 2; }
+static void toggle_init (GtkCellRenderer *c) { rd (c)->kind = R_TOGGLE; c->xpad = c->ypad = 2; c->mode = GTK_CELL_RENDERER_MODE_ACTIVATABLE; }
+static void pixbuf_init (GtkCellRenderer *c) { rd (c)->kind = R_PIXBUF; }
+static void progress_init (GtkCellRenderer *c) { rd (c)->kind = R_PROGRESS; c->xpad = c->ypad = 2; }
+static void spin_init (GtkCellRenderer *c) { rd (c)->kind = R_SPIN; }
+static void combo_init (GtkCellRenderer *c) { rd (c)->kind = R_COMBO; }
+
+static GType stock_type (GType parent, const char *name, void (*ci) (GtkCellRendererClass *), void (*ii) (GtkCellRenderer *))
+{
+  return g_type_register_static_simple (parent, g_intern_static_string (name), sizeof (GtkCellRendererClass),
+                                        (GClassInitFunc) ci, sizeof (GtkCellRenderer), (GInstanceInitFunc) ii, (GTypeFlags) 0);
 }
 
 extern "C" {
-GType gtk_cell_renderer_text_get_type (void) { static GType t = renderer_subtype ("GtkCellRendererText"); return t; }
-GType gtk_cell_renderer_toggle_get_type (void) { static GType t = renderer_subtype ("GtkCellRendererToggle"); return t; }
-GType gtk_cell_renderer_pixbuf_get_type (void) { static GType t = renderer_subtype ("GtkCellRendererPixbuf"); return t; }
-GType gtk_cell_renderer_progress_get_type (void) { static GType t = renderer_subtype ("GtkCellRendererProgress"); return t; }
-GType gtk_cell_renderer_spin_get_type (void) { static GType t = renderer_subtype ("GtkCellRendererSpin"); return t; }
-GType gtk_cell_renderer_combo_get_type (void) { static GType t = renderer_subtype ("GtkCellRendererCombo"); return t; }
-GtkCellRenderer *gtk_cell_renderer_text_new (void) { return renderer_new (gtk_cell_renderer_text_get_type (), R_TEXT); }
-GtkCellRenderer *gtk_cell_renderer_toggle_new (void) { return renderer_new (gtk_cell_renderer_toggle_get_type (), R_TOGGLE); }
-GtkCellRenderer *gtk_cell_renderer_pixbuf_new (void) { return renderer_new (gtk_cell_renderer_pixbuf_get_type (), R_PIXBUF); }
-GtkCellRenderer *gtk_cell_renderer_progress_new (void) { return renderer_new (gtk_cell_renderer_progress_get_type (), R_PROGRESS); }
-GtkCellRenderer *gtk_cell_renderer_spin_new (void) { return renderer_new (gtk_cell_renderer_spin_get_type (), R_SPIN); }
-GtkCellRenderer *gtk_cell_renderer_combo_new (void) { return renderer_new (gtk_cell_renderer_combo_get_type (), R_COMBO); }
+GType gtk_cell_renderer_text_get_type (void) { static GType t = stock_type (GTK_TYPE_CELL_RENDERER, "GtkCellRendererText", text_class_init, text_init); return t; }
+GType gtk_cell_renderer_toggle_get_type (void) { static GType t = stock_type (GTK_TYPE_CELL_RENDERER, "GtkCellRendererToggle", toggle_class_init, toggle_init); return t; }
+GType gtk_cell_renderer_pixbuf_get_type (void) { static GType t = stock_type (GTK_TYPE_CELL_RENDERER, "GtkCellRendererPixbuf", pixbuf_class_init, pixbuf_init); return t; }
+GType gtk_cell_renderer_progress_get_type (void) { static GType t = stock_type (GTK_TYPE_CELL_RENDERER, "GtkCellRendererProgress", progress_class_init, progress_init); return t; }
+GType gtk_cell_renderer_spin_get_type (void) { static GType t = stock_type (GTK_TYPE_CELL_RENDERER_TEXT, "GtkCellRendererSpin", spin_class_init, spin_init); return t; }
+GType gtk_cell_renderer_combo_get_type (void) { static GType t = stock_type (GTK_TYPE_CELL_RENDERER_TEXT, "GtkCellRendererCombo", combo_class_init, combo_init); return t; }
+GtkCellRenderer *gtk_cell_renderer_text_new (void) { return (GtkCellRenderer *) g_object_new (GTK_TYPE_CELL_RENDERER_TEXT, nullptr); }
+GtkCellRenderer *gtk_cell_renderer_toggle_new (void) { return (GtkCellRenderer *) g_object_new (GTK_TYPE_CELL_RENDERER_TOGGLE, nullptr); }
+GtkCellRenderer *gtk_cell_renderer_pixbuf_new (void) { return (GtkCellRenderer *) g_object_new (GTK_TYPE_CELL_RENDERER_PIXBUF, nullptr); }
+GtkCellRenderer *gtk_cell_renderer_progress_new (void) { return (GtkCellRenderer *) g_object_new (GTK_TYPE_CELL_RENDERER_PROGRESS, nullptr); }
+GtkCellRenderer *gtk_cell_renderer_spin_new (void) { return (GtkCellRenderer *) g_object_new (GTK_TYPE_CELL_RENDERER_SPIN, nullptr); }
+GtkCellRenderer *gtk_cell_renderer_combo_new (void) { return (GtkCellRenderer *) g_object_new (GTK_TYPE_CELL_RENDERER_COMBO, nullptr); }
 void gtk_cell_renderer_toggle_set_radio (GtkCellRendererToggle *t, gboolean radio) { rd (t)->radio = radio; }
+gboolean gtk_cell_renderer_toggle_get_radio (GtkCellRendererToggle *t) { return rd (t)->radio; }
 void gtk_cell_renderer_toggle_set_active (GtkCellRendererToggle *t, gboolean setting) { rd (t)->active = setting; }
-void gtk_cell_renderer_set_alignment (GtkCellRenderer *c, gfloat xalign, gfloat) { rd (c)->xalign = xalign; }
-void gtk_cell_renderer_set_padding (GtkCellRenderer *, gint, gint) {}
-void gtk_cell_renderer_set_visible (GtkCellRenderer *c, gboolean visible) { rd (c)->visible = visible; }
+gboolean gtk_cell_renderer_toggle_get_active (GtkCellRendererToggle *t) { return rd (t)->active; }
+void gtk_cell_renderer_toggle_set_activatable (GtkCellRendererToggle *t, gboolean setting) { rd (t)->activatable = setting; }
+gboolean gtk_cell_renderer_toggle_get_activatable (GtkCellRendererToggle *t) { return rd (t)->activatable; }
+void gtk_cell_renderer_text_set_fixed_height_from_font (GtkCellRendererText *c, gint rows)
+{
+  if (rows < 0) { c->height = -1; return; }
+  QFontMetrics fm (cell_font (c, nullptr));
+  c->height = fm.lineSpacing () * qMax (1, rows) + 2 * c->ypad;
+}
+
+void gtk_cell_renderer_set_alignment (GtkCellRenderer *c, gfloat xalign, gfloat yalign) { c->xalign = xalign; c->yalign = yalign; }
+void gtk_cell_renderer_get_alignment (GtkCellRenderer *c, gfloat *xalign, gfloat *yalign) { if (xalign) *xalign = c->xalign; if (yalign) *yalign = c->yalign; }
+void gtk_cell_renderer_set_padding (GtkCellRenderer *c, gint xpad, gint ypad) { c->xpad = xpad; c->ypad = ypad; }
+void gtk_cell_renderer_get_padding (GtkCellRenderer *c, gint *xpad, gint *ypad) { if (xpad) *xpad = c->xpad; if (ypad) *ypad = c->ypad; }
+void gtk_cell_renderer_set_visible (GtkCellRenderer *c, gboolean visible) { c->visible = visible; }
+gboolean gtk_cell_renderer_get_visible (GtkCellRenderer *c) { return c->visible; }
+void gtk_cell_renderer_set_sensitive (GtkCellRenderer *c, gboolean sensitive) { c->sensitive = sensitive; }
+gboolean gtk_cell_renderer_get_sensitive (GtkCellRenderer *c) { return c->sensitive; }
+void gtk_cell_renderer_set_fixed_size (GtkCellRenderer *c, gint width, gint height) { c->width = width; c->height = height; }
+void gtk_cell_renderer_get_fixed_size (GtkCellRenderer *c, gint *width, gint *height) { if (width) *width = c->width; if (height) *height = c->height; }
+gboolean gtk_cell_renderer_is_activatable (GtkCellRenderer *c) { return c->visible && c->mode == GTK_CELL_RENDERER_MODE_ACTIVATABLE; }
+
+GtkSizeRequestMode gtk_cell_renderer_get_request_mode (GtkCellRenderer *c)
+{
+  GtkCellRendererClass *k = GTK_CELL_RENDERER_GET_CLASS (c);
+  return k->get_request_mode ? k->get_request_mode (c) : GTK_SIZE_REQUEST_HEIGHT_FOR_WIDTH;
+}
+void gtk_cell_renderer_get_preferred_width (GtkCellRenderer *c, GtkWidget *w, gint *min, gint *nat)
+{
+  gint a = 0, b = 0;
+  GTK_CELL_RENDERER_GET_CLASS (c)->get_preferred_width (c, w, &a, &b);
+  if (min) *min = a;
+  if (nat) *nat = qMax (a, b);
+}
+void gtk_cell_renderer_get_preferred_height (GtkCellRenderer *c, GtkWidget *w, gint *min, gint *nat)
+{
+  gint a = 0, b = 0;
+  GTK_CELL_RENDERER_GET_CLASS (c)->get_preferred_height (c, w, &a, &b);
+  if (min) *min = a;
+  if (nat) *nat = qMax (a, b);
+}
+void gtk_cell_renderer_get_preferred_height_for_width (GtkCellRenderer *c, GtkWidget *w, gint width, gint *min, gint *nat)
+{
+  gint a = 0, b = 0;
+  GTK_CELL_RENDERER_GET_CLASS (c)->get_preferred_height_for_width (c, w, width, &a, &b);
+  if (min) *min = a;
+  if (nat) *nat = qMax (a, b);
+}
+void gtk_cell_renderer_get_preferred_width_for_height (GtkCellRenderer *c, GtkWidget *w, gint height, gint *min, gint *nat)
+{
+  gint a = 0, b = 0;
+  GTK_CELL_RENDERER_GET_CLASS (c)->get_preferred_width_for_height (c, w, height, &a, &b);
+  if (min) *min = a;
+  if (nat) *nat = qMax (a, b);
+}
+void gtk_cell_renderer_get_preferred_size (GtkCellRenderer *c, GtkWidget *w, GtkRequisition *min, GtkRequisition *nat)
+{
+  gint minw, natw, minh, nath;
+  gtk_cell_renderer_get_preferred_width (c, w, &minw, &natw);
+  gtk_cell_renderer_get_preferred_height_for_width (c, w, natw, &minh, &nath);
+  if (min) { min->width = minw; min->height = minh; }
+  if (nat) { nat->width = natw; nat->height = nath; }
+}
+
+void gtk_cell_renderer_get_size (GtkCellRenderer *c, GtkWidget *w, const GdkRectangle *area, gint *x_off, gint *y_off, gint *width,
+                                 gint *height)
+{
+  GtkCellRendererClass *k = GTK_CELL_RENDERER_GET_CLASS (c);
+  if (k->get_size) { k->get_size (c, w, area, x_off, y_off, width, height); return; }
+  GtkRequisition nat;
+  gtk_cell_renderer_get_preferred_size (c, w, nullptr, &nat);
+  if (width) *width = nat.width;
+  if (height) *height = nat.height;
+  if (x_off) *x_off = area ? qMax (0, qRound (c->xalign * (area->width - nat.width))) : 0;
+  if (y_off) *y_off = area ? qMax (0, qRound (c->yalign * (area->height - nat.height))) : 0;
+}
+
+void gtk_cell_renderer_get_aligned_area (GtkCellRenderer *c, GtkWidget *w, GtkCellRendererState flags, const GdkRectangle *area,
+                                         GdkRectangle *aligned)
+{
+  GtkCellRendererClass *k = GTK_CELL_RENDERER_GET_CLASS (c);
+  if (k->get_aligned_area) { k->get_aligned_area (c, w, flags, area, aligned); return; }
+  gint x = 0, y = 0, wd = 0, h = 0;
+  gtk_cell_renderer_get_size (c, w, area, &x, &y, &wd, &h);
+  aligned->x = area->x + x;
+  aligned->y = area->y + y;
+  aligned->width = qMin (wd, area->width - x);
+  aligned->height = qMin (h, area->height - y);
+}
+
+void gtk_cell_renderer_render (GtkCellRenderer *c, cairo_t *cr, GtkWidget *w, const GdkRectangle *bg, const GdkRectangle *area,
+                               GtkCellRendererState flags)
+{
+  if (c->cell_background_set && !rd (c)->background.isEmpty () && bg) {
+    QColor col (rd (c)->background);
+    cairo_save (cr);
+    cairo_set_source_rgba (cr, col.redF (), col.greenF (), col.blueF (), col.alphaF ());
+    cairo_rectangle (cr, bg->x, bg->y, bg->width, bg->height);
+    cairo_fill (cr);
+    cairo_restore (cr);
+  }
+  call_render (c, cr, w, bg, area, flags);
+}
+
+void gtkqt_cell_renderer_render2 (GtkCellRenderer *c, GdkDrawable *window, GtkWidget *w, GdkRectangle *bg, GdkRectangle *area,
+                                  GdkRectangle *expose, GtkCellRendererState flags)
+{
+  GtkCellRendererClass *k = GTK_CELL_RENDERER_GET_CLASS (c);
+  if (!k->render || builtin_renders (c)) {
+    cairo_t *cr = gdk_cairo_create (window);
+    gtk_cell_renderer_render (c, cr, w, bg, area, flags);
+    cairo_destroy (cr);
+    return;
+  }
+  ((Render2Func) (gpointer) k->render) (c, window, w, bg, area, expose, flags);
+}
+
+gboolean gtk_cell_renderer_activate (GtkCellRenderer *c, GdkEvent *event, GtkWidget *w, const gchar *path, const GdkRectangle *bg,
+                                     const GdkRectangle *area, GtkCellRendererState flags)
+{
+  GtkCellRendererClass *k = GTK_CELL_RENDERER_GET_CLASS (c);
+  if (rd (c)->kind == R_TOGGLE && rd (c)->activatable) { g_signal_emit_by_name (c, "toggled", path); return TRUE; }
+  return k->activate && c->mode == GTK_CELL_RENDERER_MODE_ACTIVATABLE ? k->activate (c, event, w, path, bg, area, flags) : FALSE;
+}
+
+void gtk_cell_renderer_stop_editing (GtkCellRenderer *c, gboolean canceled)
+{
+  if (!c->editing) return;
+  c->editing = FALSE;
+  if (canceled) g_signal_emit_by_name (c, "editing-canceled");
+}
+
+GtkStateFlags gtk_cell_renderer_get_state (GtkCellRenderer *c, GtkWidget *w, GtkCellRendererState cell_state)
+{
+  guint f = 0;
+  if (!c->sensitive || (w && !gtk_widget_is_sensitive (w)) || (cell_state & GTK_CELL_RENDERER_INSENSITIVE)) f |= GTK_STATE_FLAG_INSENSITIVE;
+  if (cell_state & GTK_CELL_RENDERER_SELECTED) f |= GTK_STATE_FLAG_SELECTED;
+  if (cell_state & GTK_CELL_RENDERER_PRELIT) f |= GTK_STATE_FLAG_PRELIGHT;
+  if (cell_state & GTK_CELL_RENDERER_FOCUSED) f |= GTK_STATE_FLAG_FOCUSED;
+  return (GtkStateFlags) f;
+}
 }
 
 /* A column's list of cells with their attribute mappings (also used by combo boxes). */
 struct Cell {
   GtkCellRenderer *renderer;
+  bool expand = true;
   QList<QPair<QByteArray, int>> attrs;
   GtkTreeCellDataFunc func = nullptr;
   gpointer func_data = nullptr;
@@ -483,7 +1107,7 @@ public:
     QStringList texts;
     for (Cell &c : *cells) {
       RendererData *d = rd (c.renderer);
-      if (!d->visible) continue;
+      if (!c.renderer->visible) continue;
       switch (d->kind) {
       case R_TOGGLE:
         if (role == Qt::CheckStateRole) out = d->active ? Qt::Checked : Qt::Unchecked;
@@ -496,7 +1120,7 @@ public:
         break;
       case R_PROGRESS:
         if (role == Qt::UserRole + 1) out = d->value;
-        if (role == Qt::DisplayRole) texts << (d->text.isEmpty () ? QStringLiteral ("%1 %").arg (d->value) : d->text);
+        if (role == Qt::DisplayRole) texts << (d->text_null ? QStringLiteral ("%1 %").arg (d->value) : d->text);
         break;
       default:
         if (role == Qt::DisplayRole || role == Qt::EditRole) {
@@ -506,9 +1130,11 @@ public:
           texts << t;
         }
         if (role == Qt::ForegroundRole && !d->foreground.isEmpty ()) out = QBrush (QColor (d->foreground));
-        if (role == Qt::BackgroundRole && !d->background.isEmpty ()) out = QBrush (QColor (d->background));
-        if (role == Qt::FontRole && (d->weight >= 600 || d->markup.contains ("<b>"))) { QFont f; f.setBold (true); out = f; }
-        if (role == Qt::TextAlignmentRole) out = int ((d->xalign > 0.75 ? Qt::AlignRight : d->xalign > 0.25 ? Qt::AlignHCenter : Qt::AlignLeft) | Qt::AlignVCenter);
+        if (role == Qt::BackgroundRole && c.renderer->cell_background_set && !d->background.isEmpty ()) out = QBrush (QColor (d->background));
+        if (role == Qt::FontRole && (d->weight != 400 || d->scale != 1.0 || !d->font.isEmpty () || d->size_points > 0))
+          out = cell_font (c.renderer, nullptr);
+        else if (role == Qt::FontRole && d->markup.contains ("<b>")) { QFont f; f.setBold (true); out = f; }
+        if (role == Qt::TextAlignmentRole) out = int ((c.renderer->xalign > 0.75 ? Qt::AlignRight : c.renderer->xalign > 0.25 ? Qt::AlignHCenter : Qt::AlignLeft) | Qt::AlignVCenter);
         break;
       }
     }
@@ -602,10 +1228,13 @@ static void cells_add_attributes (QList<Cell> &cells, GtkCellRenderer *cell, va_
   }
 }
 
-static void cells_pack (QList<Cell> &cells, GtkCellRenderer *cell)
+static void cells_pack (QList<Cell> &cells, GtkCellRenderer *cell, bool expand = true)
 {
   g_object_ref_sink (cell);
-  cells << Cell { cell, {} };
+  Cell c;
+  c.renderer = cell;
+  c.expand = expand;
+  cells << c;
 }
 
 extern "C" {
@@ -624,8 +1253,8 @@ GtkTreeViewColumn *gtk_tree_view_column_new_with_attributes (const gchar *title,
   return c;
 }
 
-void gtk_tree_view_column_pack_start (GtkTreeViewColumn *c, GtkCellRenderer *cell, gboolean) { cells_pack (cd (c)->cells, cell); column_changed (c); }
-void gtk_tree_view_column_pack_end (GtkTreeViewColumn *c, GtkCellRenderer *cell, gboolean) { cells_pack (cd (c)->cells, cell); column_changed (c); }
+void gtk_tree_view_column_pack_start (GtkTreeViewColumn *c, GtkCellRenderer *cell, gboolean expand) { cells_pack (cd (c)->cells, cell, expand); column_changed (c); }
+void gtk_tree_view_column_pack_end (GtkTreeViewColumn *c, GtkCellRenderer *cell, gboolean expand) { cells_pack (cd (c)->cells, cell, expand); column_changed (c); }
 
 void gtk_tree_view_column_add_attribute (GtkTreeViewColumn *c, GtkCellRenderer *cell, const gchar *attribute, gint column)
 {
@@ -754,8 +1383,112 @@ public:
   using QStyledItemDelegate::QStyledItemDelegate;
   void paint (QPainter *p, const QStyleOptionViewItem &opt, const QModelIndex &i) const override
   {
-    paint_cell (p, opt, i);
+    if (!paint_by_renderers (p, opt, i)) paint_cell (p, opt, i);
     paint_marks (p, opt, i);
+  }
+
+  /* a column with a renderer the program wrote: its cells render
+   * themselves on cairo, laid out side by side as GtkTreeViewColumn does */
+  static GtkWidget *view_widget (const QStyleOptionViewItem &opt)
+  {
+    return opt.widget ? (GtkWidget *) opt.widget->property ("_gtkqt_widget").value<void *> () : nullptr;
+  }
+  static QList<Cell> *custom_cells (const QModelIndex &i)
+  {
+    auto *a = dynamic_cast<const GtkQtItemModel *> (i.model ());
+    QList<Cell> *cells = a ? a->prepared (i) : nullptr;
+    if (!cells) return nullptr;
+    for (const Cell &c : *cells) if (renders_itself (c.renderer)) return cells;
+    return nullptr;
+  }
+  static QVector<QRect> layout_cells (QList<Cell> *cells, GtkWidget *w, const QRect &r)
+  {
+    QVector<QRect> out (cells->size ());
+    QVector<int> nat (cells->size ());
+    int total = 0, expanders = 0;
+    for (int k = 0; k < cells->size (); k++) {
+      const Cell &c = (*cells)[k];
+      if (!c.renderer->visible) continue;
+      gint mn = 0, nt = 0;
+      gtk_cell_renderer_get_preferred_width (c.renderer, w, &mn, &nt);
+      nat[k] = nt;
+      total += nt;
+      if (c.expand) expanders++;
+    }
+    int extra = qMax (0, r.width () - total), x = r.x ();
+    for (int k = 0; k < cells->size (); k++) {
+      const Cell &c = (*cells)[k];
+      if (!c.renderer->visible) continue;
+      int wd = nat[k];
+      if (expanders ? c.expand : k == cells->size () - 1) {
+        int share = expanders ? extra / expanders : extra;
+        wd += share;
+        extra -= share;
+        if (expanders) expanders--;
+      }
+      out[k] = QRect (x, r.y (), qMin (wd, r.right () + 1 - x), r.height ());
+      x += wd;
+    }
+    return out;
+  }
+  bool paint_by_renderers (QPainter *p, const QStyleOptionViewItem &option, const QModelIndex &i) const
+  {
+    QList<Cell> *cells = custom_cells (i);
+    if (!cells) return false;
+    QStyleOptionViewItem opt = option;
+    initStyleOption (&opt, i);
+    opt.text.clear ();
+    opt.icon = QIcon ();
+    opt.features &= ~QStyleOptionViewItem::HasCheckIndicator;
+    QStyle *st = opt.widget ? opt.widget->style () : QApplication::style ();
+    st->drawPrimitive (QStyle::PE_PanelItemViewItem, &opt, p, opt.widget);
+    GtkWidget *w = view_widget (opt);
+    guint flags = 0;
+    if (opt.state & QStyle::State_Selected) flags |= GTK_CELL_RENDERER_SELECTED;
+    if (opt.state & QStyle::State_MouseOver) flags |= GTK_CELL_RENDERER_PRELIT;
+    if (!(opt.state & QStyle::State_Enabled)) flags |= GTK_CELL_RENDERER_INSENSITIVE;
+    if (opt.state & QStyle::State_HasFocus) flags |= GTK_CELL_RENDERER_FOCUSED;
+    QRect r = opt.rect;
+    QVector<QRect> areas = layout_cells (cells, w, QRect (0, 0, r.width (), r.height ()));
+    qreal dpr = opt.widget ? opt.widget->devicePixelRatioF () : 1.0;
+    QImage img (QSize (qCeil (r.width () * dpr), qCeil (r.height () * dpr)), QImage::Format_ARGB32_Premultiplied);
+    img.setDevicePixelRatio (dpr);
+    img.fill (Qt::transparent);
+    cairo_surface_t *surf = cairo_image_surface_create_for_data (img.bits (), CAIRO_FORMAT_ARGB32, img.width (), img.height (),
+                                                                 img.bytesPerLine ());
+    cairo_surface_set_device_scale (surf, dpr, dpr);
+    cairo_t *cr = cairo_create (surf);
+    for (int k = 0; k < cells->size (); k++) {
+      GtkCellRenderer *c = (*cells)[k].renderer;
+      if (!c->visible || areas[k].isEmpty ()) continue;
+      GdkRectangle bg = { areas[k].x (), areas[k].y (), areas[k].width (), areas[k].height () };
+      GdkRectangle area = bg;
+      cairo_save (cr);
+      cairo_rectangle (cr, bg.x, bg.y, bg.width, bg.height);
+      cairo_clip (cr);
+      gtk_cell_renderer_render (c, cr, w, &bg, &area, (GtkCellRendererState) flags);
+      cairo_restore (cr);
+    }
+    cairo_destroy (cr);
+    cairo_surface_flush (surf);
+    cairo_surface_destroy (surf);
+    p->drawImage (r.topLeft (), img);
+    return true;
+  }
+  QSize sizeHint (const QStyleOptionViewItem &opt, const QModelIndex &i) const override
+  {
+    QList<Cell> *cells = custom_cells (i);
+    if (!cells) return QStyledItemDelegate::sizeHint (opt, i);
+    GtkWidget *w = view_widget (opt);
+    int wd = 0, h = 0;
+    for (const Cell &c : *cells) {
+      if (!c.renderer->visible) continue;
+      GtkRequisition nat;
+      gtk_cell_renderer_get_preferred_size (c.renderer, w, nullptr, &nat);
+      wd += nat.width;
+      h = qMax (h, nat.height);
+    }
+    return QSize (wd, h);
   }
   /* GTK draws grid lines and the drop position of a drag over the rows */
   void paint_marks (QPainter *p, const QStyleOptionViewItem &opt, const QModelIndex &i) const

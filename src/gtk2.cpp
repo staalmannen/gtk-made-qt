@@ -224,7 +224,21 @@ GdkPixbuf *gdk_pixbuf_get_from_drawable (GdkPixbuf *dest, GdkDrawable *src, GdkC
                                          int dest_x, int dest_y, int width, int height)
 {
   cairo_surface_t *s = gtkqt_drawable_target (src);
-  if (!s) return nullptr;
+  if (!s) {
+    /* a window Qt paints: what is on screen, as GTK reads it */
+    QWidget *qw = drawable_qwidget (src);
+    if (!qw) return nullptr;
+    if (width < 0) width = qw->width () - src_x;
+    if (height < 0) height = qw->height () - src_y;
+    if (width <= 0 || height <= 0) return nullptr;
+    QImage img = qw->grab (QRect (src_x, src_y, width, height)).toImage ();
+    if (img.size () != QSize (width, height)) img = img.scaled (width, height, Qt::IgnoreAspectRatio, Qt::SmoothTransformation);
+    GdkPixbuf *pb = gtkqt_pixbuf_from_image (img.convertToFormat (QImage::Format_ARGB32));
+    if (!pb || !dest) return pb;
+    gdk_pixbuf_copy_area (pb, 0, 0, width, height, dest, dest_x, dest_y);
+    g_object_unref (pb);
+    return dest;
+  }
   int sw = 0, sh = 0;
   gdk_drawable_get_size (src, &sw, &sh);
   if (width < 0) width = sw - src_x;

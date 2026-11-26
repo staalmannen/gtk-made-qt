@@ -96,6 +96,58 @@ static void squares_iface_init (GtkTreeModelIface *i)
   i->iter_nth_child = sq_iter_nth_child; i->iter_parent = sq_iter_parent;
 }
 
+/* ---------- a cell renderer the program writes: a swatch with a label ---------- */
+typedef struct { GtkCellRenderer parent; int rgb; GtkCellRenderer *text; } Swatch;
+typedef struct { GtkCellRendererClass parent_class; } SwatchClass;
+G_DEFINE_TYPE (Swatch, swatch, GTK_TYPE_CELL_RENDERER)
+static int swatch_renders;
+static void swatch_init (Swatch *s) { s->text = g_object_ref_sink (gtk_cell_renderer_text_new ()); }
+static void swatch_set_property (GObject *o, guint id, const GValue *v, GParamSpec *ps) { ((Swatch *) o)->rgb = g_value_get_int (v); }
+static void swatch_get_property (GObject *o, guint id, GValue *v, GParamSpec *ps) { g_value_set_int (v, ((Swatch *) o)->rgb); }
+static void swatch_get_size (GtkCellRenderer *c, GtkWidget *w, const GdkRectangle *area, gint *x, gint *y, gint *wd, gint *h)
+{
+  int xpad, ypad;
+  gtk_cell_renderer_get_padding (c, &xpad, &ypad);
+  if (x) *x = 0;
+  if (y) *y = 0;
+  if (wd) *wd = 60 + 2 * xpad;
+  if (h) *h = 30 + 2 * ypad;
+}
+static void swatch_render (GtkCellRenderer *c, cairo_t *cr, GtkWidget *w, const GdkRectangle *bg, const GdkRectangle *area,
+                           GtkCellRendererState flags)
+{
+  Swatch *s = (Swatch *) c;
+  swatch_renders++;
+  cairo_set_source_rgb (cr, ((s->rgb >> 16) & 255) / 255.0, ((s->rgb >> 8) & 255) / 255.0, (s->rgb & 255) / 255.0);
+  cairo_rectangle (cr, area->x, area->y, 20, area->height);
+  cairo_fill (cr);
+  /* a stock renderer drawn by the program's */
+  GdkRectangle text_area = { area->x + 22, area->y, area->width - 22, area->height };
+  GtkRequisition size;
+  g_object_set (s->text, "text", "label", "scale", 0.8, "weight", PANGO_WEIGHT_BOLD, NULL);
+  gtk_cell_renderer_get_preferred_size (s->text, w, NULL, &size);
+  CHECK (size.width > 10 && size.height > 5);
+  gtk_cell_renderer_render (s->text, cr, w, &text_area, &text_area, flags);
+}
+static void swatch_class_init (SwatchClass *k)
+{
+  G_OBJECT_CLASS (k)->set_property = swatch_set_property;
+  G_OBJECT_CLASS (k)->get_property = swatch_get_property;
+  g_object_class_install_property (G_OBJECT_CLASS (k), 1, g_param_spec_int ("rgb", NULL, NULL, 0, 0xffffff, 0, G_PARAM_READWRITE));
+  GTK_CELL_RENDERER_CLASS (k)->get_size = swatch_get_size;
+  GTK_CELL_RENDERER_CLASS (k)->render = swatch_render;
+}
+
+static guint32 pixel_at (GdkWindow *w, int x, int y)
+{
+  GdkPixbuf *p = gdk_pixbuf_get_from_window (w, x, y, 1, 1);
+  CHECK (p);
+  guchar *px = gdk_pixbuf_get_pixels (p);
+  guint32 v = px[0] << 16 | px[1] << 8 | px[2];
+  g_object_unref (p);
+  return v;
+}
+
 static int view_rows (GtkWidget *view)
 {
   GtkTreeSelection *sel = gtk_tree_view_get_selection (GTK_TREE_VIEW (view));
@@ -299,6 +351,31 @@ int main (int argc, char **argv)
   GtkTreeModel *ss = gtk_tree_model_sort_new_with_model (sq);
   gtk_tree_sortable_set_sort_column_id (GTK_TREE_SORTABLE (ss), 0, GTK_SORT_DESCENDING);
   CHECK (nth (ss, NULL, 0) == 25 && nth (ss, NULL, 5) == 0);
+
+  /* ---------- the program's cell renderer ---------- */
+  GtkListStore *cs = gtk_list_store_new (1, G_TYPE_INT);
+  gtk_list_store_insert_with_values (cs, NULL, -1, 0, 0xff0000, -1);
+  gtk_list_store_insert_with_values (cs, NULL, -1, 0, 0x0000ff, -1);
+  GtkWidget *v3 = gtk_tree_view_new_with_model (GTK_TREE_MODEL (cs));
+  GtkCellRenderer *sw = g_object_new (swatch_get_type (), "xpad", 2, "ypad", 3, NULL);
+  GtkRequisition req;
+  gtk_cell_renderer_get_preferred_size (sw, v3, NULL, &req);
+  CHECK (req.width == 64 && req.height == 36);
+  gtk_tree_view_insert_column_with_attributes (GTK_TREE_VIEW (v3), -1, "swatch", sw, "rgb", 0, NULL);
+  gtk_tree_view_set_headers_visible (GTK_TREE_VIEW (v3), FALSE);
+  gtk_container_remove (GTK_CONTAINER (win), v2);
+  gtk_container_add (GTK_CONTAINER (win), v3);
+  gtk_widget_show_all (win);
+  while (gtk_events_pending ()) gtk_main_iteration ();
+  GdkWindow *bin = gtk_tree_view_get_bin_window (GTK_TREE_VIEW (v3));
+  CHECK ((pixel_at (bin, 8, 10) & 0xf0f0f0) == 0xf00000);   /* row 0: red */
+  GdkRectangle cell;
+  GtkTreePath *p1 = gtk_tree_path_new_from_indices (1, -1);
+  gtk_tree_view_get_cell_area (GTK_TREE_VIEW (v3), p1, NULL, &cell);
+  gtk_tree_path_free (p1);
+  CHECK (cell.height >= 36);                                   /* the renderer's height */
+  CHECK ((pixel_at (bin, 8, cell.y + cell.height / 2) & 0xf0f0f0) == 0x0000f0);
+  CHECK (swatch_renders >= 2);
 
   /* ---------- row references ---------- */
   GtkListStore *rs = gtk_list_store_new (1, G_TYPE_INT);
