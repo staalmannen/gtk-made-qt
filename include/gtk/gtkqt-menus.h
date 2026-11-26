@@ -298,6 +298,15 @@ void            gtk_action_group_add_radio_actions (GtkActionGroup *action_group
 GtkAction      *gtk_action_group_get_action (GtkActionGroup *action_group, const gchar *action_name);
 void            gtk_action_group_set_translation_domain (GtkActionGroup *action_group, const gchar *domain);
 GtkUIManager   *gtk_ui_manager_new (void);
+gboolean        gtk_action_get_sensitive (GtkAction *action);
+gboolean        gtk_action_is_sensitive (GtkAction *action);
+gboolean        gtk_action_get_visible (GtkAction *action);
+gboolean        gtk_action_is_visible (GtkAction *action);
+GList          *gtk_ui_manager_get_action_groups (GtkUIManager *manager);
+guint           gtk_ui_manager_add_ui_from_resource (GtkUIManager *manager, const gchar *resource_path, GError **error);
+GList          *gtk_action_group_list_actions (GtkActionGroup *action_group);
+gint            gtk_radio_action_get_current_value (GtkRadioAction *action);
+void            gtk_radio_action_set_current_value (GtkRadioAction *action, gint current_value);
 void            gtk_ui_manager_insert_action_group (GtkUIManager *manager, GtkActionGroup *action_group, gint pos);
 guint           gtk_ui_manager_add_ui_from_string (GtkUIManager *manager, const gchar *buffer, gssize length, GError **error);
 guint           gtk_ui_manager_add_ui_from_file (GtkUIManager *manager, const gchar *filename, GError **error);

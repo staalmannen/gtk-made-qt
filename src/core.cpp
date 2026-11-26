@@ -80,6 +80,8 @@ GTKQT_ENUM (gdk_fill_get_type, "GdkFill", EV (GDK_SOLID, "solid"), EV (GDK_TILED
 GTKQT_ENUM (gtk_direction_type_get_type, "GtkDirectionType", EV (GTK_DIR_TAB_FORWARD, "tab-forward"),
             EV (GTK_DIR_TAB_BACKWARD, "tab-backward"), EV (GTK_DIR_UP, "up"), EV (GTK_DIR_DOWN, "down"), EV (GTK_DIR_LEFT, "left"),
             EV (GTK_DIR_RIGHT, "right"))
+GTKQT_ENUM (gtk_tree_view_column_sizing_get_type, "GtkTreeViewColumnSizing", EV (GTK_TREE_VIEW_COLUMN_GROW_ONLY, "grow-only"),
+            EV (GTK_TREE_VIEW_COLUMN_AUTOSIZE, "autosize"), EV (GTK_TREE_VIEW_COLUMN_FIXED, "fixed"))
 GTKQT_ENUM (gtk_delete_type_get_type, "GtkDeleteType", EV (GTK_DELETE_CHARS, "chars"), EV (GTK_DELETE_WORD_ENDS, "word-ends"),
             EV (GTK_DELETE_WORDS, "words"), EV (GTK_DELETE_DISPLAY_LINES, "display-lines"),
             EV (GTK_DELETE_DISPLAY_LINE_ENDS, "display-line-ends"), EV (GTK_DELETE_PARAGRAPH_ENDS, "paragraph-ends"),
@@ -465,6 +467,7 @@ static const StockItem stock_items2[] = {
 /* stock items and icons registered by the program (gtk_stock_add, icon factories) */
 QHash<QString, QByteArray> gtkqt_user_stock_labels;
 QHash<QString, QIcon> gtkqt_user_icons;
+bool gtkqt_synthetic_key = false;
 
 static const StockItem *find_stock (const gchar *id)
 {
@@ -978,6 +981,11 @@ static void gtk_widget_class_init (GtkWidgetClass *klass)
   g_signal_new ("size-request", t, G_SIGNAL_RUN_FIRST, 0, nullptr, nullptr, nullptr, G_TYPE_NONE, 1, G_TYPE_POINTER);
   sigev ("unmap-event", 0);
   sigev ("visibility-notify-event", 0);
+  g_signal_new ("popup-menu", t, (GSignalFlags) (G_SIGNAL_RUN_LAST | G_SIGNAL_ACTION), 0, g_signal_accumulator_true_handled,
+                nullptr, nullptr, G_TYPE_BOOLEAN, 0);
+  g_signal_new ("style-updated", t, G_SIGNAL_RUN_FIRST, 0, nullptr, nullptr, nullptr, G_TYPE_NONE, 0);
+  g_signal_new ("query-tooltip", t, G_SIGNAL_RUN_LAST, 0, g_signal_accumulator_true_handled, nullptr, nullptr,
+                G_TYPE_BOOLEAN, 4, G_TYPE_INT, G_TYPE_INT, G_TYPE_BOOLEAN, GTK_TYPE_TOOLTIP);
   widget_signals[SIG_FOCUS_IN] = sigev ("focus-in-event", G_STRUCT_OFFSET (GtkWidgetClass, focus_in_event));
   widget_signals[SIG_FOCUS_OUT] = sigev ("focus-out-event", G_STRUCT_OFFSET (GtkWidgetClass, focus_out_event));
   widget_signals[SIG_EXPOSE] = sigev ("expose-event", G_STRUCT_OFFSET (GtkWidgetClass, expose_event));
@@ -1019,13 +1027,20 @@ static void gtk_widget_class_init (GtkWidgetClass *klass)
   gtkqt_prop (klass, g_param_spec_string ("tooltip-markup", nullptr, nullptr, nullptr, RW),
               WSET (gtk_widget_set_tooltip_markup, g_value_get_string), nullptr);
   gtkqt_prop (klass, g_param_spec_boolean ("has-tooltip", nullptr, nullptr, FALSE, RW),
-              WSET (gtk_widget_set_has_tooltip, g_value_get_boolean), nullptr);
+              WSET (gtk_widget_set_has_tooltip, g_value_get_boolean), WGET (g_value_set_boolean, gtk_widget_get_has_tooltip));
   gtkqt_prop (klass, g_param_spec_int ("width-request", nullptr, nullptr, -1, G_MAXINT, -1, RW),
               [] (GObject *o, const GValue *v) { GtkWidget *w = GTK_WIDGET (o); gtk_widget_set_size_request (w, g_value_get_int (v), w->priv->height_request); },
               [] (GObject *o, GValue *v) { g_value_set_int (v, GTK_WIDGET (o)->priv->width_request); });
   gtkqt_prop (klass, g_param_spec_int ("height-request", nullptr, nullptr, -1, G_MAXINT, -1, RW),
               [] (GObject *o, const GValue *v) { GtkWidget *w = GTK_WIDGET (o); gtk_widget_set_size_request (w, w->priv->width_request, g_value_get_int (v)); },
               [] (GObject *o, GValue *v) { g_value_set_int (v, GTK_WIDGET (o)->priv->height_request); });
+  /* GTK 3: both directions */
+  gtkqt_prop (klass, g_param_spec_boolean ("expand", nullptr, nullptr, FALSE, RW),
+              [] (GObject *o, const GValue *v) {
+                gtk_widget_set_hexpand (GTK_WIDGET (o), g_value_get_boolean (v));
+                gtk_widget_set_vexpand (GTK_WIDGET (o), g_value_get_boolean (v));
+              },
+              [] (GObject *o, GValue *v) { g_value_set_boolean (v, gtk_widget_get_hexpand (GTK_WIDGET (o)) && gtk_widget_get_vexpand (GTK_WIDGET (o))); });
   gtkqt_prop (klass, g_param_spec_boolean ("hexpand", nullptr, nullptr, FALSE, RW),
               WSET (gtk_widget_set_hexpand, g_value_get_boolean), WGET (g_value_set_boolean, gtk_widget_get_hexpand));
   gtkqt_prop (klass, g_param_spec_boolean ("vexpand", nullptr, nullptr, FALSE, RW),
@@ -1197,6 +1212,7 @@ bool GtkQtBridge::eventFilter (QObject *watched, QEvent *e)
     switch (e->type ()) {
     case QEvent::MouseButtonPress: case QEvent::MouseButtonRelease: case QEvent::MouseButtonDblClick:
     case QEvent::MouseMove: case QEvent::TabletPress: case QEvent::TabletMove: case QEvent::TabletRelease: break;
+    case QEvent::ToolTip: break;
     case QEvent::Resize:
       /* scroll bars coming and going change what a scrolled list or text is
        * given (update_allocation): GTK allocates it again */
@@ -1215,6 +1231,7 @@ bool GtkQtBridge::eventFilter (QObject *watched, QEvent *e)
   GdkWindow *evwin = w->window;
   if (watched != w->priv->obj.data ())
     if (void *p = qw->property ("_gtkqt_gdkwindow").value<void *> ()) evwin = (GdkWindow *) p;
+  if (auto *ie = dynamic_cast<QInputEvent *> (e)) { extern guint32 gtkqt_last_event_time; gtkqt_last_event_time = (guint32) ie->timestamp (); }
   GtkQtEmitGuard guard;
   struct Keep { GtkWidget *w; ~Keep () { g_object_unref (w); } } keep { (GtkWidget *) g_object_ref (w) };
   bool consumed = false;
@@ -1224,6 +1241,16 @@ bool GtkQtBridge::eventFilter (QObject *watched, QEvent *e)
 
   GdkEvent ev = {};
   switch (e->type ()) {
+  case QEvent::ToolTip:
+    return gtkqt_tooltip_event (w, qw, static_cast<QHelpEvent *> (e));
+  case QEvent::ContextMenu:
+    /* the menu key or Shift+F10: GTK's "popup-menu" */
+    if (static_cast<QContextMenuEvent *> (e)->reason () == QContextMenuEvent::Keyboard) {
+      gboolean handled = FALSE;
+      g_signal_emit_by_name (w, "popup-menu", &handled);
+      if (handled) return true;
+    }
+    return false;
   case QEvent::Close:
     if (GTK_IS_WINDOW (w)) return handle_window_close (w, static_cast<QCloseEvent *> (e));
     return false;
@@ -1327,6 +1354,7 @@ bool GtkQtBridge::eventFilter (QObject *watched, QEvent *e)
   }
   case QEvent::KeyPress:
   case QEvent::KeyRelease: {
+    if (gtkqt_synthetic_key) return false;
     auto *ke = static_cast<QKeyEvent *> (e);
     QByteArray txt = ke->text ().toUtf8 ();
     ev.key.type = e->type () == QEvent::KeyPress ? GDK_KEY_PRESS : GDK_KEY_RELEASE;
@@ -1611,7 +1639,14 @@ void gtk_widget_set_tooltip_markup (GtkWidget *widget, const gchar *markup)
   if (QWidget *qw = gtkqt_qw (widget)) qw->setToolTip (markup ? gtkqt_markup_to_html (markup) : QString ());
 }
 
-void gtk_widget_set_has_tooltip (GtkWidget *, gboolean) {}
+void gtk_widget_set_has_tooltip (GtkWidget *widget, gboolean has_tooltip)
+{
+  if (!widget->priv || widget->priv->has_tooltip == (bool) has_tooltip) return;
+  widget->priv->has_tooltip = has_tooltip;
+  g_object_notify (G_OBJECT (widget), "has-tooltip");
+}
+gboolean gtk_widget_get_has_tooltip (GtkWidget *widget) { return widget->priv && widget->priv->has_tooltip; }
+void gtk_widget_trigger_tooltip_query (GtkWidget *) {}
 
 void gtk_widget_set_name (GtkWidget *widget, const gchar *name)
 {
@@ -2549,3 +2584,67 @@ void gtk_widget_get_child_requisition (GtkWidget *widget, GtkRequisition *req)
   gtk_widget_size_request (widget, req);
 }
 } /* extern "C" */
+
+/* ======================================================================
+ * GtkTooltip: widgets with has-tooltip ask "query-tooltip" what to show
+ * ====================================================================== */
+struct _GtkTooltip {
+  GObject parent_instance;
+  QString *text;
+  bool markup;
+  QRect *area;
+  bool area_set;
+  bool has_icon;
+};
+typedef struct { GObjectClass parent_class; } GtkTooltipClass;
+G_DEFINE_TYPE (GtkTooltip, gtk_tooltip, G_TYPE_OBJECT)
+static void gtk_tooltip_init (GtkTooltip *t) { t->text = new QString; t->area = new QRect; }
+static void tooltip_finalize (GObject *o)
+{
+  auto *t = (GtkTooltip *) o;
+  delete t->text;
+  delete t->area;
+  G_OBJECT_CLASS (gtk_tooltip_parent_class)->finalize (o);
+}
+static void gtk_tooltip_class_init (GtkTooltipClass *klass) { G_OBJECT_CLASS (klass)->finalize = tooltip_finalize; }
+
+bool gtkqt_tooltip_event (GtkWidget *w, QWidget *at, QHelpEvent *he)
+{
+  if (!w->priv || !w->priv->has_tooltip) return false;
+  QWidget *wq = gtkqt_qw (w);
+  if (!wq) return false;
+  QPoint pos = at == wq ? he->pos () : at->mapTo (wq, he->pos ());
+  auto *tip = (GtkTooltip *) g_object_new (GTK_TYPE_TOOLTIP, nullptr);
+  gboolean shown = FALSE;
+  g_signal_emit_by_name (w, "query-tooltip", pos.x (), pos.y (), FALSE, tip, &shown);
+  if (shown && !tip->text->isEmpty ()) {
+    QString t = tip->markup ? gtkqt_markup_to_html (tip->text->toUtf8 ().constData ()) : *tip->text;
+    QRect area = tip->area_set ? QRect (wq->mapTo (at, tip->area->topLeft ()), tip->area->size ()) : QRect ();
+    QToolTip::showText (he->globalPos (), t, at, area);
+  } else if (!shown && !wq->toolTip ().isEmpty ()) {
+    QToolTip::showText (he->globalPos (), wq->toolTip (), at);
+  } else {
+    QToolTip::hideText ();
+  }
+  g_object_unref (tip);
+  return true;
+}
+
+extern "C" {
+void gtk_tooltip_set_text (GtkTooltip *t, const gchar *text) { *t->text = gtkqt_str (text); t->markup = false; }
+void gtk_tooltip_set_markup (GtkTooltip *t, const gchar *markup) { *t->text = gtkqt_str (markup); t->markup = true; }
+void gtk_tooltip_set_icon (GtkTooltip *t, GdkPixbuf *pixbuf) { t->has_icon = pixbuf != nullptr; }
+void gtk_tooltip_set_icon_from_icon_name (GtkTooltip *t, const gchar *icon_name, GtkIconSize) { t->has_icon = icon_name != nullptr; }
+void gtk_tooltip_set_icon_from_stock (GtkTooltip *t, const gchar *stock_id, GtkIconSize) { t->has_icon = stock_id != nullptr; }
+/* a custom widget: its text, where it is a label */
+void gtk_tooltip_set_custom (GtkTooltip *t, GtkWidget *custom)
+{
+  if (custom && GTK_IS_LABEL (custom)) { *t->text = gtkqt_str (gtk_label_get_label (GTK_LABEL (custom))); t->markup = gtk_label_get_use_markup (GTK_LABEL (custom)); }
+}
+void gtk_tooltip_set_tip_area (GtkTooltip *t, const GdkRectangle *rect)
+{
+  t->area_set = rect != nullptr;
+  if (rect) *t->area = QRect (rect->x, rect->y, rect->width, rect->height);
+}
+void gtk_tooltip_trigger_tooltip_query (GdkDisplay *) {}
+}

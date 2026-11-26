@@ -42,6 +42,11 @@ typedef GtkWidget GtkNative;
 #define gtk_file_chooser_set_current_folder(c, f, e) gtk_file_chooser_set_current_folder_file ((c), (f), (e))
 #endif
 
+/* ---- GTK 2/3: the files as a GSList of GFile ---- */
+#if GTKQT_API_VERSION <= 3
+#define gtk_file_chooser_get_files(c) gtkqt_file_chooser_get_files3 (c)
+#endif
+
 /* ---- GTK 2: cell renderers draw on a GdkDrawable ---- */
 #if GTKQT_API_VERSION <= 2
 #define gtk_cell_renderer_render(c, w, wi, b, a, e, f) gtkqt_cell_renderer_render2 ((c), (w), (wi), (b), (a), (e), (f))

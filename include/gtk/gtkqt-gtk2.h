@@ -121,10 +121,44 @@ typedef struct _GtkIconTheme GtkIconTheme;
 typedef enum { GTK_ICON_LOOKUP_NO_SVG = 1 << 0, GTK_ICON_LOOKUP_FORCE_SVG = 1 << 1,
                GTK_ICON_LOOKUP_USE_BUILTIN = 1 << 2, GTK_ICON_LOOKUP_GENERIC_FALLBACK = 1 << 3,
                GTK_ICON_LOOKUP_FORCE_SIZE = 1 << 4 } GtkIconLookupFlags;
+/* the desktop's icon theme (Qt's), plus icons programs add */
+#define GTK_TYPE_ICON_THEME  (gtk_icon_theme_get_type ())
+#define GTK_ICON_THEME(o)    (G_TYPE_CHECK_INSTANCE_CAST ((o), GTK_TYPE_ICON_THEME, GtkIconTheme))
+#define GTK_IS_ICON_THEME(o) (G_TYPE_CHECK_INSTANCE_TYPE ((o), GTK_TYPE_ICON_THEME))
+typedef struct _GtkIconInfo GtkIconInfo;
+#define GTK_TYPE_ICON_INFO   (gtk_icon_info_get_type ())
+#define GTK_ICON_THEME_ERROR (gtk_icon_theme_error_quark ())
+typedef enum { GTK_ICON_THEME_NOT_FOUND, GTK_ICON_THEME_FAILED } GtkIconThemeError;
+GType         gtk_icon_theme_get_type (void) G_GNUC_CONST;
+GType         gtk_icon_info_get_type (void) G_GNUC_CONST;
+GQuark        gtk_icon_theme_error_quark (void);
+GtkIconTheme *gtk_icon_theme_new (void);
 GtkIconTheme *gtk_icon_theme_get_default (void);
+GtkIconTheme *gtk_icon_theme_get_for_screen (GdkScreen *screen);
+void          gtk_icon_theme_set_screen (GtkIconTheme *icon_theme, GdkScreen *screen);
 GdkPixbuf    *gtk_icon_theme_load_icon (GtkIconTheme *icon_theme, const gchar *icon_name, gint size,
                                         GtkIconLookupFlags flags, GError **error);
 gboolean      gtk_icon_theme_has_icon (GtkIconTheme *icon_theme, const gchar *icon_name);
+GtkIconInfo  *gtk_icon_theme_lookup_icon (GtkIconTheme *icon_theme, const gchar *icon_name, gint size, GtkIconLookupFlags flags);
+GtkIconInfo  *gtk_icon_theme_choose_icon (GtkIconTheme *icon_theme, const gchar *icon_names[], gint size, GtkIconLookupFlags flags);
+GtkIconInfo  *gtk_icon_theme_lookup_by_gicon (GtkIconTheme *icon_theme, GIcon *icon, gint size, GtkIconLookupFlags flags);
+void          gtk_icon_theme_add_builtin_icon (const gchar *icon_name, gint size, GdkPixbuf *pixbuf);
+void          gtk_icon_theme_append_search_path (GtkIconTheme *icon_theme, const gchar *path);
+void          gtk_icon_theme_prepend_search_path (GtkIconTheme *icon_theme, const gchar *path);
+void          gtk_icon_theme_add_resource_path (GtkIconTheme *icon_theme, const gchar *path);
+void          gtk_icon_theme_set_custom_theme (GtkIconTheme *icon_theme, const gchar *theme_name);
+gboolean      gtk_icon_theme_rescan_if_needed (GtkIconTheme *icon_theme);
+gint         *gtk_icon_theme_get_icon_sizes (GtkIconTheme *icon_theme, const gchar *icon_name);
+const gchar  *gtk_icon_info_get_filename (GtkIconInfo *icon_info);
+GdkPixbuf    *gtk_icon_info_get_builtin_pixbuf (GtkIconInfo *icon_info);
+gint          gtk_icon_info_get_base_size (GtkIconInfo *icon_info);
+GdkPixbuf    *gtk_icon_info_load_icon (GtkIconInfo *icon_info, GError **error);
+GdkPixbuf    *gtk_icon_info_load_symbolic (GtkIconInfo *icon_info, const GdkRGBA *fg, const GdkRGBA *success_color,
+                                           const GdkRGBA *warning_color, const GdkRGBA *error_color, gboolean *was_symbolic,
+                                           GError **error);
+GtkIconInfo  *gtk_icon_info_copy (GtkIconInfo *icon_info);
+void          gtk_icon_info_free (GtkIconInfo *icon_info);
+gboolean      gtk_icon_size_lookup_for_settings (GtkSettings *settings, GtkIconSize size, gint *width, gint *height);
 void          gtk_window_set_icon (GtkWindow *window, GdkPixbuf *icon);
 void          gtk_window_set_default_icon (GdkPixbuf *icon);
 gboolean      gtk_window_set_icon_from_file (GtkWindow *window, const gchar *filename, GError **err);
@@ -369,6 +403,83 @@ void       gtk_widget_override_font (GtkWidget *widget, const PangoFontDescripti
 void       gtk_widget_override_color (GtkWidget *widget, GtkStateFlags state, const GdkRGBA *color);
 void       gtk_widget_override_background_color (GtkWidget *widget, GtkStateFlags state, const GdkRGBA *color);
 GdkDevice *gtk_get_current_event_device (void);
+guint32    gtk_get_current_event_time (void);
+gboolean   gtk_show_uri_on_window (GtkWindow *parent, const char *uri, guint32 timestamp, GError **error);
+void       gtk_window_set_urgency_hint (GtkWindow *window, gboolean setting);
+gboolean   gtk_window_get_urgency_hint (GtkWindow *window);
+void       gtk_drag_dest_add_uri_targets (GtkWidget *widget);
+void       gtk_drag_dest_add_text_targets (GtkWidget *widget);
+void       gtk_drag_dest_add_image_targets (GtkWidget *widget);
+gboolean   gtk_file_chooser_add_shortcut_folder (GtkFileChooser *chooser, const char *folder, GError **error);
+gboolean   gtk_file_chooser_remove_shortcut_folder (GtkFileChooser *chooser, const char *folder, GError **error);
+void       gtk_style_context_get_color (GtkStyleContext *context, GtkStateFlags state, GdkRGBA *color);
+void       gtk_style_context_get_background_color (GtkStyleContext *context, GtkStateFlags state, GdkRGBA *color);
+GtkClipboard *gtk_clipboard_get_for_display (GdkDisplay *display, GdkAtom selection);
+/* GTK 3 style class names (CSS classes) */
+#define GTK_STYLE_CLASS_CELL "cell"
+#define GTK_STYLE_CLASS_ENTRY "entry"
+#define GTK_STYLE_CLASS_BUTTON "button"
+#define GTK_STYLE_CLASS_LABEL "label"
+#define GTK_STYLE_CLASS_TOOLBAR "toolbar"
+#define GTK_STYLE_CLASS_PRIMARY_TOOLBAR "primary-toolbar"
+#define GTK_STYLE_CLASS_INLINE_TOOLBAR "inline-toolbar"
+#define GTK_STYLE_CLASS_MENU "menu"
+#define GTK_STYLE_CLASS_MENUBAR "menubar"
+#define GTK_STYLE_CLASS_MENUITEM "menuitem"
+#define GTK_STYLE_CLASS_TITLEBAR "titlebar"
+#define GTK_STYLE_CLASS_TITLE "title"
+#define GTK_STYLE_CLASS_SUBTITLE "subtitle"
+#define GTK_STYLE_CLASS_DIM_LABEL "dim-label"
+#define GTK_STYLE_CLASS_SIDEBAR "sidebar"
+#define GTK_STYLE_CLASS_VIEW "view"
+#define GTK_STYLE_CLASS_FRAME "frame"
+#define GTK_STYLE_CLASS_FLAT "flat"
+#define GTK_STYLE_CLASS_LINKED "linked"
+#define GTK_STYLE_CLASS_SUGGESTED_ACTION "suggested-action"
+#define GTK_STYLE_CLASS_DESTRUCTIVE_ACTION "destructive-action"
+#define GTK_STYLE_CLASS_ERROR "error"
+#define GTK_STYLE_CLASS_WARNING "warning"
+#define GTK_STYLE_CLASS_INFO "info"
+#define GTK_STYLE_CLASS_QUESTION "question"
+#define GTK_STYLE_CLASS_MONOSPACE "monospace"
+#define GTK_STYLE_CLASS_BACKGROUND "background"
+#define GTK_STYLE_CLASS_SEPARATOR "separator"
+#define GTK_STYLE_CLASS_HORIZONTAL "horizontal"
+#define GTK_STYLE_CLASS_VERTICAL "vertical"
+#define GTK_STYLE_CLASS_TOP "top"
+#define GTK_STYLE_CLASS_BOTTOM "bottom"
+#define GTK_STYLE_CLASS_LEFT "left"
+#define GTK_STYLE_CLASS_RIGHT "right"
+#define GTK_STYLE_CLASS_LIST "list"
+#define GTK_STYLE_CLASS_LIST_ROW "list-row"
+#define GTK_STYLE_CLASS_TOOLTIP "tooltip"
+#define GTK_STYLE_CLASS_POPUP "popup"
+#define GTK_STYLE_CLASS_SCROLLBAR "scrollbar"
+#define GTK_STYLE_CLASS_PROGRESSBAR "progressbar"
+#define GTK_STYLE_CLASS_SPINNER "spinner"
+#define GTK_STYLE_CLASS_EXPANDER "expander"
+#define GTK_STYLE_CLASS_NOTEBOOK "notebook"
+#define GTK_STYLE_CLASS_HEADER "header"
+#define GTK_STYLE_CLASS_RUBBERBAND "rubberband"
+#define GTK_STYLE_CLASS_IMAGE "image"
+#define GTK_STYLE_CLASS_CHECK "check"
+#define GTK_STYLE_CLASS_RADIO "radio"
+#define GTK_STYLE_CLASS_ACCELERATOR "accelerator"
+#define GTK_STYLE_CLASS_OSD "osd"
+#define GTK_STYLE_CLASS_DND "dnd"
+#define GTK_STYLE_CLASS_NEEDS_ATTENTION "needs-attention"
+#define GTK_STYLE_CLASS_READ_ONLY "read-only"
+#define GTK_STYLE_CLASS_DEFAULT "default"
+#define GTK_STYLE_CLASS_SCALE "scale"
+#define GTK_STYLE_CLASS_TROUGH "trough"
+#define GTK_STYLE_CLASS_SLIDER "slider"
+#define GTK_STYLE_CLASS_PANE_SEPARATOR "pane-separator"
+#define GTK_STYLE_CLASS_HIGHLIGHT "highlight"
+#define GTK_STYLE_CLASS_GRIP "grip"
+#define GTK_STYLE_CLASS_MARK "mark"
+#define GTK_STYLE_CLASS_ARROW "arrow"
+#define GTK_STYLE_CLASS_CALENDAR "calendar"
+#define GTK_STYLE_CLASS_DOCK "dock"
 /* a widget's events from tablet tools (pen, eraser): GDK_EXTENSION_EVENTS_ALL */
 void       gtk_widget_set_extension_events (GtkWidget *widget, GdkExtensionMode mode);
 GdkExtensionMode gtk_widget_get_extension_events (GtkWidget *widget);

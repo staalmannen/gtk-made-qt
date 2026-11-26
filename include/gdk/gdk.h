@@ -336,6 +336,7 @@ gboolean     gdk_event_get_button (GdkEvent *event, guint *button);
 gboolean     gdk_event_get_keyval (GdkEvent *event, guint *keyval);
 gboolean     gdk_event_get_state (GdkEvent *event, GdkModifierType *state);
 guint32      gdk_event_get_time (GdkEvent *event);
+GdkEvent    *gdk_event_new (GdkEventType type);
 GdkEvent    *gdk_event_copy (GdkEvent *event);
 void         gdk_event_free (GdkEvent *event);
 
@@ -386,6 +387,9 @@ void        gdk_threads_leave (void);
 #define GDK_THREADS_LEAVE() gdk_threads_leave ()
 guint       gdk_threads_add_idle (GSourceFunc function, gpointer data);
 guint       gdk_threads_add_timeout (guint interval, GSourceFunc function, gpointer data);
+guint       gdk_threads_add_timeout_seconds (guint interval, GSourceFunc function, gpointer data);
+guint       gdk_threads_add_timeout_seconds_full (gint priority, guint interval, GSourceFunc function, gpointer data,
+                                                  GDestroyNotify notify);
 
 /* ======================================================================
  * GTK 1/2 GDK: drawables, graphics contexts, atoms, colormaps.

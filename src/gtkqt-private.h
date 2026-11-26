@@ -57,6 +57,7 @@ struct _GtkWidgetPrivate {
   bool destroyed = false;
   bool in_destruction = false;
   bool no_show_all = false;
+  bool has_tooltip = false;        /* "query-tooltip" decides the widget's tooltips */
   bool sensitive = true;
   bool hexpand = false, vexpand = false;
   bool hexpand_set = false, vexpand_set = false;
@@ -193,6 +194,7 @@ void gtkqt_prop (gpointer klass, GParamSpec *pspec, GtkQtPropSet set, GtkQtPropG
 gboolean gtkqt_emit_event (GtkWidget *widget, GdkEvent *event, const char *signal_name);
 guint    gtkqt_qt_key_to_keyval (int qt_key, const QString &text, Qt::KeyboardModifiers mods);
 int      gtkqt_keyval_to_qt_key (guint keyval);   /* keypad keys carry Qt::KeypadModifier */
+extern bool gtkqt_synthetic_key;                 /* gtk_widget_event's own key event is on its way to Qt */
 guint    gtkqt_qt_mods_to_gdk (Qt::KeyboardModifiers mods, Qt::MouseButtons buttons);
 void     gtkqt_controllers_dispatch (GtkWidget *widget, QEvent *event, bool *consumed);
 
@@ -257,6 +259,8 @@ class QTabletEvent;
 bool       gtkqt_tablet_event (GtkWidget *widget, QWidget *qw, QTabletEvent *event, GdkWindow *window);
 void       gtkqt_devices_init (void);
 gboolean   gtkqt_bindings_activate (GtkWidget *widget, guint keyval, guint state);   /* GtkBindingSet */
+class QHelpEvent;
+bool       gtkqt_tooltip_event (GtkWidget *widget, QWidget *at, QHelpEvent *event);   /* "query-tooltip" */
 /* gtkrc / CSS (rcstyle.cpp) */
 void       gtkqt_rc_init (void);                                   /* default rc files, settings, key theme */
 void       gtkqt_rc_style_widget (GtkWidget *widget, bool recurse); /* apply the matching rc / CSS rules */

@@ -195,14 +195,38 @@ void gtk_dialog_set_has_separator (GtkDialog *, gboolean) {}
 /* ======================================================================
  * GtkMessageDialog
  * ====================================================================== */
+static void message_fit (GtkMessageDialog *md);
 G_DEFINE_TYPE (GtkMessageDialog, gtk_message_dialog, GTK_TYPE_DIALOG)
 static void gtk_message_dialog_init (GtkMessageDialog *) {}
 static void gtk_message_dialog_class_init (GtkMessageDialogClass *klass)
 {
   gtkqt_prop (klass, g_param_spec_string ("text", nullptr, nullptr, nullptr, RW),
-              [] (GObject *o, const GValue *v) { gtk_label_set_text (GTK_LABEL (GTK_MESSAGE_DIALOG (o)->label), g_value_get_string (v)); }, nullptr);
+              [] (GObject *o, const GValue *v) {
+                gtk_label_set_text (GTK_LABEL (GTK_MESSAGE_DIALOG (o)->label), g_value_get_string (v));
+                message_fit (GTK_MESSAGE_DIALOG (o));
+              }, nullptr);
   gtkqt_prop (klass, g_param_spec_string ("secondary-text", nullptr, nullptr, nullptr, RW),
               [] (GObject *o, const GValue *v) { gtk_message_dialog_format_secondary_text (GTK_MESSAGE_DIALOG (o), "%s", g_value_get_string (v)); }, nullptr);
+}
+
+/* GTK: the labels are about 50 characters wide (60 at most) and as tall as
+ * their wrapped text; the primary text is bold above secondary text */
+static void message_fit (GtkMessageDialog *md)
+{
+  auto *sec = (GtkWidget *) g_object_get_data (G_OBJECT (md), "gtkqt-secondary");
+  bool has_secondary = sec && gtk_widget_get_visible (sec);
+  for (GtkWidget *lw : { md->label, sec }) {
+    auto *l = lw ? gtkqt_q<QLabel> (lw) : nullptr;
+    if (!l) continue;
+    if (lw == md->label) { QFont f = l->font (); f.setBold (has_secondary); l->setFont (f); }
+    QFontMetrics fm (l->font ());
+    QString plain = l->textFormat () == Qt::RichText ? QTextDocumentFragment::fromHtml (l->text ()).toPlainText () : l->text ();
+    int full = 0;
+    for (const QString &line : plain.split ('\n')) full = qMax (full, fm.horizontalAdvance (line));
+    int w = qMin (full, fm.averageCharWidth () * 60);
+    w = qMax (w, qMin (full, fm.averageCharWidth () * 50));
+    gtk_widget_set_size_request (lw, w > 0 ? w : -1, w > 0 ? l->heightForWidth (w) : -1);
+  }
 }
 
 static GtkWidget *message_dialog_build (GtkWindow *parent, GtkDialogFlags flags, GtkMessageType type, GtkButtonsType buttons)
@@ -215,7 +239,6 @@ static GtkWidget *message_dialog_build (GtkWindow *parent, GtkDialogFlags flags,
   d->label = gtk_label_new (nullptr);
   gtk_label_set_xalign (GTK_LABEL (d->label), 0);
   gtk_label_set_wrap (GTK_LABEL (d->label), TRUE);
-  if (QWidget *l = gtkqt_qw (d->label)) { QFont f = l->font (); f.setBold (true); l->setFont (f); }
   GtkWidget *secondary = gtk_label_new (nullptr);
   gtk_label_set_xalign (GTK_LABEL (secondary), 0);
   gtk_label_set_wrap (GTK_LABEL (secondary), TRUE);
@@ -256,6 +279,7 @@ GtkWidget *gtk_message_dialog_new (GtkWindow *parent, GtkDialogFlags flags, GtkM
     gtk_label_set_text (GTK_LABEL (GTK_MESSAGE_DIALOG (d)->label), msg);
     g_free (msg);
   }
+  message_fit (GTK_MESSAGE_DIALOG (d));
   return d;
 }
 
@@ -271,10 +295,11 @@ GtkWidget *gtk_message_dialog_new_with_markup (GtkWindow *parent, GtkDialogFlags
     gtk_label_set_markup (GTK_LABEL (GTK_MESSAGE_DIALOG (d)->label), msg);
     g_free (msg);
   }
+  message_fit (GTK_MESSAGE_DIALOG (d));
   return d;
 }
 
-void gtk_message_dialog_set_markup (GtkMessageDialog *d, const gchar *str) { gtk_label_set_markup (GTK_LABEL (d->label), str); }
+void gtk_message_dialog_set_markup (GtkMessageDialog *d, const gchar *str) { gtk_label_set_markup (GTK_LABEL (d->label), str); message_fit (d); }
 
 static void secondary (GtkMessageDialog *d, gchar *msg, bool markup)
 {
@@ -282,6 +307,7 @@ static void secondary (GtkMessageDialog *d, gchar *msg, bool markup)
   if (markup) gtk_label_set_markup (GTK_LABEL (l), msg); else gtk_label_set_text (GTK_LABEL (l), msg);
   gtk_widget_set_visible (l, msg != nullptr);
   g_free (msg);
+  message_fit (d);
 }
 
 void gtk_message_dialog_format_secondary_text (GtkMessageDialog *d, const gchar *fmt, ...)
@@ -602,6 +628,13 @@ static void button_set_path (GtkWidget *b, const gchar *path, bool emit)
   if (emit) {
     g_signal_emit_by_name (b, "selection-changed");
     g_signal_emit_by_name (b, "file-set");
+  } else {
+    /* set by the program: GTK reports the new selection once the
+     * chooser has read the folder, from the main loop */
+    g_idle_add_full (G_PRIORITY_DEFAULT_IDLE, +[] (gpointer p) -> gboolean {
+      g_signal_emit_by_name (p, "selection-changed");
+      return G_SOURCE_REMOVE;
+    }, g_object_ref (b), g_object_unref);
   }
 }
 
@@ -762,6 +795,26 @@ gboolean gtk_file_chooser_set_current_folder (GtkFileChooser *c, const gchar *fi
   return TRUE;
 }
 
+/* the dialog's sidebar */
+gboolean gtk_file_chooser_add_shortcut_folder (GtkFileChooser *c, const char *folder, GError **)
+{
+  QFileDialog *fd = chooser (c);
+  if (!fd || !folder) return FALSE;
+  QList<QUrl> urls = fd->sidebarUrls ();
+  QUrl u = QUrl::fromLocalFile (QString::fromUtf8 (folder));
+  if (!urls.contains (u)) { urls << u; fd->setSidebarUrls (urls); }
+  return TRUE;
+}
+gboolean gtk_file_chooser_remove_shortcut_folder (GtkFileChooser *c, const char *folder, GError **)
+{
+  QFileDialog *fd = chooser (c);
+  if (!fd || !folder) return FALSE;
+  QList<QUrl> urls = fd->sidebarUrls ();
+  bool had = urls.removeAll (QUrl::fromLocalFile (QString::fromUtf8 (folder))) > 0;
+  fd->setSidebarUrls (urls);
+  return had;
+}
+
 gboolean gtk_file_chooser_set_current_folder_file (GtkFileChooser *c, GFile *file, GError **)
 {
   gchar *p = file ? g_file_get_path (file) : nullptr;
@@ -841,6 +894,14 @@ GListModel *gtk_file_chooser_get_files (GtkFileChooser *c)
       g_object_unref (file);
     }
   return G_LIST_MODEL (s);
+}
+
+GSList *gtkqt_file_chooser_get_files3 (GtkFileChooser *c)
+{
+  GSList *l = nullptr;
+  if (QFileDialog *fd = chooser (c))
+    for (const QString &f : fd->selectedFiles ()) l = g_slist_append (l, g_file_new_for_path (f.toUtf8 ().constData ()));
+  return l;
 }
 
 void gtk_file_chooser_add_filter (GtkFileChooser *c, GtkFileFilter *filter)

@@ -132,6 +132,7 @@ gchar     *gtk_file_chooser_get_uri (GtkFileChooser *chooser);
 gchar     *gtk_file_chooser_get_current_folder (GtkFileChooser *chooser);
 GFile     *gtk_file_chooser_get_file (GtkFileChooser *chooser);
 GListModel *gtk_file_chooser_get_files (GtkFileChooser *chooser);
+GSList     *gtkqt_file_chooser_get_files3 (GtkFileChooser *chooser);   /* GTK 2/3: a list of GFile */
 void       gtk_file_chooser_add_filter (GtkFileChooser *chooser, GtkFileFilter *filter);
 void       gtk_file_chooser_set_filter (GtkFileChooser *chooser, GtkFileFilter *filter);
 gboolean   gtk_file_chooser_set_current_folder_file (GtkFileChooser *chooser, GFile *file, GError **error);

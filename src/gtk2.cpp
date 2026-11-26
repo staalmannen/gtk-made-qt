@@ -10,6 +10,7 @@
 #include "gtkqt-private.h"
 
 #include <QtWidgets>
+#include <QDesktopServices>
 #include <QClipboard>
 #include <QMimeData>
 #include <QScreen>
@@ -1348,21 +1349,274 @@ gboolean gtk_icon_size_lookup (GtkIconSize size, gint *width, gint *height)
   return TRUE;
 }
 
-struct _GtkIconTheme { int dummy; };
-GtkIconTheme *gtk_icon_theme_get_default (void) { static GtkIconTheme t; return &t; }
-gboolean gtk_icon_theme_has_icon (GtkIconTheme *, const gchar *icon_name) { gtkqt_ensure_app (); return QIcon::hasThemeIcon (gtkqt_str (icon_name)); }
-GdkPixbuf *gtk_icon_theme_load_icon (GtkIconTheme *, const gchar *icon_name, gint size, GtkIconLookupFlags, GError **error)
+} /* extern "C" */
+
+/* ---------- GtkIconTheme: Qt's icon theme, the files behind it, and the
+ * icons programs add as built in ---------- */
+struct _GtkIconTheme { GObject parent_instance; };
+typedef struct { GObjectClass parent_class; } GtkIconThemeClass;
+G_DEFINE_TYPE (GtkIconTheme, gtk_icon_theme, G_TYPE_OBJECT)
+static void gtk_icon_theme_init (GtkIconTheme *) {}
+static void gtk_icon_theme_class_init (GtkIconThemeClass *klass)
+{
+  g_signal_new ("changed", G_TYPE_FROM_CLASS (klass), G_SIGNAL_RUN_LAST, 0, nullptr, nullptr, nullptr, G_TYPE_NONE, 0);
+}
+
+struct _GtkIconInfo {
+  GObject parent_instance;
+  gchar *name;
+  gchar *filename;
+  GdkPixbuf *builtin;
+  gint size;
+  gint base_size;
+  GtkIconLookupFlags flags;
+};
+typedef struct { GObjectClass parent_class; } GtkIconInfoClass;
+G_DEFINE_TYPE (GtkIconInfo, gtk_icon_info, G_TYPE_OBJECT)
+static void gtk_icon_info_init (GtkIconInfo *) {}
+static void icon_info_finalize (GObject *o)
+{
+  auto *i = (GtkIconInfo *) o;
+  g_free (i->name);
+  g_free (i->filename);
+  if (i->builtin) g_object_unref (i->builtin);
+  G_OBJECT_CLASS (gtk_icon_info_parent_class)->finalize (o);
+}
+static void gtk_icon_info_class_init (GtkIconInfoClass *klass) { G_OBJECT_CLASS (klass)->finalize = icon_info_finalize; }
+
+namespace {
+/* name -> (size -> pixbuf) */
+QHash<QString, QMap<int, GdkPixbuf *>> &builtin_icons () { static QHash<QString, QMap<int, GdkPixbuf *>> h; return h; }
+
+/* the icon's file in the theme (then its fallbacks and hicolor), nearest to size */
+QString icon_file (const QString &name, int size, int *base_size)
+{
+  static QHash<QString, QString> cache;
+  QString key = name + QLatin1Char ('@') + QString::number (size) + QLatin1Char ('@') + QIcon::themeName ();
+  if (cache.contains (key)) return cache.value (key);
+  QStringList themes { QIcon::themeName () };
+#if QT_VERSION >= QT_VERSION_CHECK (5, 12, 0)
+  if (!QIcon::fallbackThemeName ().isEmpty ()) themes << QIcon::fallbackThemeName ();
+#endif
+  themes << QStringLiteral ("hicolor");
+  QString best;
+  int best_score = INT_MAX, best_size = 0;
+  for (const QString &theme : themes) {
+    for (const QString &dir : QIcon::themeSearchPaths ()) {
+      QDir root (dir + QLatin1Char ('/') + theme);
+      if (!root.exists ()) continue;
+      QDirIterator it (root.path (), { name + ".png", name + ".svg", name + ".svgz", name + ".xpm" }, QDir::Files,
+                       QDirIterator::Subdirectories);
+      while (it.hasNext ()) {
+        QString f = it.next ();
+        /* ".../48x48/apps/x.png", ".../apps/48/x.svg", ".../scalable/..." */
+        int sz = 0;
+        static const QRegularExpression rx (QStringLiteral ("/(\\d+)(?:x\\d+)?(?:@\\d+)?/"));
+        QRegularExpressionMatch m = rx.match (f);
+        if (m.hasMatch ()) sz = m.captured (1).toInt ();
+        bool scalable = f.contains (QLatin1String ("/scalable/")) || f.endsWith (QLatin1String (".svg"));
+        int score = scalable ? 1000 : sz >= size ? sz - size : 2000 + (size - sz);
+        if (score < best_score) { best_score = score; best = f; best_size = scalable ? size : sz; }
+      }
+      if (!best.isEmpty () && best_score == 0) break;
+    }
+    if (!best.isEmpty ()) break;
+  }
+  cache.insert (key, best);
+  if (base_size) *base_size = best_size;
+  return best;
+}
+
+GdkPixbuf *builtin_pixbuf (const QString &name, int size)
+{
+  auto it = builtin_icons ().constFind (name);
+  if (it == builtin_icons ().constEnd () || it->isEmpty ()) return nullptr;
+  /* the nearest size at or above, else the largest */
+  auto s = it->lowerBound (size);
+  if (s == it->constEnd ()) --s;
+  return s.value ();
+}
+}
+
+extern "C" {
+
+GQuark gtk_icon_theme_error_quark (void) { return g_quark_from_static_string ("gtk-icon-theme-error-quark"); }
+GtkIconTheme *gtk_icon_theme_new (void) { return (GtkIconTheme *) g_object_new (GTK_TYPE_ICON_THEME, nullptr); }
+GtkIconTheme *gtk_icon_theme_get_default (void)
+{
+  static GtkIconTheme *t = gtk_icon_theme_new ();
+  return t;
+}
+GtkIconTheme *gtk_icon_theme_get_for_screen (GdkScreen *) { return gtk_icon_theme_get_default (); }
+void gtk_icon_theme_set_screen (GtkIconTheme *, GdkScreen *) {}
+
+gboolean gtk_icon_theme_has_icon (GtkIconTheme *, const gchar *icon_name)
 {
   gtkqt_ensure_app ();
-  QIcon icon = QIcon::fromTheme (gtkqt_str (icon_name));
-  /* GTK's theme has the stock icons ("gtk-find" ...) built in */
-  if (icon.isNull () && icon_name && g_str_has_prefix (icon_name, "gtk-")) icon = gtkqt_icon (icon_name);
-  if (icon.isNull ()) {
-    g_set_error (error, g_quark_from_static_string ("gtk-icon-theme-error-quark"), 0, "Icon '%s' not present in theme", icon_name);
+  if (!icon_name) return FALSE;
+  QString n = gtkqt_str (icon_name);
+  return builtin_icons ().contains (n) || QIcon::hasThemeIcon (n) || (g_str_has_prefix (icon_name, "gtk-") && !gtkqt_icon (icon_name).isNull ());
+}
+
+GtkIconInfo *gtk_icon_theme_lookup_icon (GtkIconTheme *theme, const gchar *icon_name, gint size, GtkIconLookupFlags flags)
+{
+  gtkqt_ensure_app ();
+  if (!icon_name) return nullptr;
+  QString n = gtkqt_str (icon_name);
+  int base = 0;
+  QString file = icon_file (n, size, &base);
+  GdkPixbuf *bi = file.isEmpty () ? builtin_pixbuf (n, size) : nullptr;
+  bool themed = !file.isEmpty () || QIcon::hasThemeIcon (n) || (g_str_has_prefix (icon_name, "gtk-") && !gtkqt_icon (icon_name).isNull ());
+  if (!themed && !bi) {
+    /* GENERIC_FALLBACK: "a-b-c", then "a-b", then "a" */
+    if ((flags & GTK_ICON_LOOKUP_GENERIC_FALLBACK) && n.contains ('-'))
+      return gtk_icon_theme_lookup_icon (theme, n.left (n.lastIndexOf ('-')).toUtf8 ().constData (), size, flags);
     return nullptr;
   }
-  return gtkqt_pixbuf_from_image (icon.pixmap (size, size).toImage ());
+  auto *i = (GtkIconInfo *) g_object_new (GTK_TYPE_ICON_INFO, nullptr);
+  i->name = g_strdup (icon_name);
+  i->filename = file.isEmpty () ? nullptr : g_strdup (file.toUtf8 ().constData ());
+  i->builtin = bi ? (GdkPixbuf *) g_object_ref (bi) : nullptr;
+  i->size = size;
+  i->base_size = bi ? gdk_pixbuf_get_width (bi) : base;
+  i->flags = flags;
+  return i;
 }
+
+GtkIconInfo *gtk_icon_theme_choose_icon (GtkIconTheme *theme, const gchar *icon_names[], gint size, GtkIconLookupFlags flags)
+{
+  for (int k = 0; icon_names && icon_names[k]; k++)
+    if (GtkIconInfo *i = gtk_icon_theme_lookup_icon (theme, icon_names[k], size, (GtkIconLookupFlags) (flags & ~GTK_ICON_LOOKUP_GENERIC_FALLBACK)))
+      return i;
+  if (flags & GTK_ICON_LOOKUP_GENERIC_FALLBACK)
+    for (int k = 0; icon_names && icon_names[k]; k++)
+      if (GtkIconInfo *i = gtk_icon_theme_lookup_icon (theme, icon_names[k], size, flags)) return i;
+  return nullptr;
+}
+
+GtkIconInfo *gtk_icon_theme_lookup_by_gicon (GtkIconTheme *theme, GIcon *icon, gint size, GtkIconLookupFlags flags)
+{
+  if (G_IS_THEMED_ICON (icon))
+    return gtk_icon_theme_choose_icon (theme, (const gchar **) g_themed_icon_get_names (G_THEMED_ICON (icon)), size, flags);
+  if (G_IS_FILE_ICON (icon)) {
+    gchar *path = g_file_get_path (g_file_icon_get_file (G_FILE_ICON (icon)));
+    if (!path) return nullptr;
+    auto *i = (GtkIconInfo *) g_object_new (GTK_TYPE_ICON_INFO, nullptr);
+    i->name = g_path_get_basename (path);
+    i->filename = path;
+    i->size = i->base_size = size;
+    i->flags = flags;
+    return i;
+  }
+  if (GDK_IS_PIXBUF (icon)) {
+    auto *i = (GtkIconInfo *) g_object_new (GTK_TYPE_ICON_INFO, nullptr);
+    i->builtin = (GdkPixbuf *) g_object_ref (icon);
+    i->size = size;
+    i->base_size = gdk_pixbuf_get_width (GDK_PIXBUF (icon));
+    return i;
+  }
+  return nullptr;
+}
+
+void gtk_icon_theme_add_builtin_icon (const gchar *icon_name, gint size, GdkPixbuf *pixbuf)
+{
+  if (!icon_name || !pixbuf) return;
+  QString n = gtkqt_str (icon_name);
+  GdkPixbuf *&slot = builtin_icons ()[n][size];
+  if (slot) g_object_unref (slot);
+  slot = (GdkPixbuf *) g_object_ref (pixbuf);
+  /* widgets naming the icon find it too, unless the theme has it */
+  gtkqt_ensure_app ();
+  if (!QIcon::hasThemeIcon (n)) {
+    QIcon icon = gtkqt_user_icons.value (n);
+    icon.addPixmap (QPixmap::fromImage (gtkqt_pixbuf_image (pixbuf)));
+    gtkqt_user_icons.insert (n, icon);
+  }
+}
+
+void gtk_icon_theme_append_search_path (GtkIconTheme *theme, const gchar *path)
+{
+  gtkqt_ensure_app ();
+  QStringList p = QIcon::themeSearchPaths ();
+  if (path && !p.contains (gtkqt_str (path))) { p << gtkqt_str (path); QIcon::setThemeSearchPaths (p); g_signal_emit_by_name (theme, "changed"); }
+}
+void gtk_icon_theme_prepend_search_path (GtkIconTheme *theme, const gchar *path)
+{
+  gtkqt_ensure_app ();
+  QStringList p = QIcon::themeSearchPaths ();
+  if (path && !p.contains (gtkqt_str (path))) { p.prepend (gtkqt_str (path)); QIcon::setThemeSearchPaths (p); g_signal_emit_by_name (theme, "changed"); }
+}
+void gtk_icon_theme_add_resource_path (GtkIconTheme *theme, const gchar *path)
+{
+  if (path) gtk_icon_theme_append_search_path (theme, (QByteArray (":") + path).constData ());
+}
+/* the theme is the desktop's */
+void gtk_icon_theme_set_custom_theme (GtkIconTheme *, const gchar *) {}
+gboolean gtk_icon_theme_rescan_if_needed (GtkIconTheme *) { return FALSE; }
+gint *gtk_icon_theme_get_icon_sizes (GtkIconTheme *, const gchar *icon_name)
+{
+  QList<int> sizes;
+  QString n = gtkqt_str (icon_name);
+  for (int s : builtin_icons ().value (n).keys ()) sizes << s;
+  QIcon icon = gtkqt_icon (icon_name);
+  for (const QSize &s : icon.availableSizes ()) if (!sizes.contains (s.width ())) sizes << s.width ();
+  gint *out = g_new0 (gint, sizes.size () + 1);
+  for (int k = 0; k < sizes.size (); k++) out[k] = sizes[k];
+  return out;
+}
+
+GdkPixbuf *gtk_icon_theme_load_icon (GtkIconTheme *theme, const gchar *icon_name, gint size, GtkIconLookupFlags flags, GError **error)
+{
+  GtkIconInfo *i = gtk_icon_theme_lookup_icon (theme, icon_name, size, flags);
+  if (!i) {
+    g_set_error (error, GTK_ICON_THEME_ERROR, GTK_ICON_THEME_NOT_FOUND, "Icon '%s' not present in theme", icon_name ? icon_name : "");
+    return nullptr;
+  }
+  GdkPixbuf *pb = gtk_icon_info_load_icon (i, error);
+  g_object_unref (i);
+  return pb;
+}
+
+const gchar *gtk_icon_info_get_filename (GtkIconInfo *i) { return i ? i->filename : nullptr; }
+GdkPixbuf *gtk_icon_info_get_builtin_pixbuf (GtkIconInfo *i) { return i ? i->builtin : nullptr; }
+gint gtk_icon_info_get_base_size (GtkIconInfo *i) { return i ? i->base_size : 0; }
+GtkIconInfo *gtk_icon_info_copy (GtkIconInfo *i) { return i ? (GtkIconInfo *) g_object_ref (i) : nullptr; }
+void gtk_icon_info_free (GtkIconInfo *i) { if (i) g_object_unref (i); }
+
+/* the icon at the size asked for (FORCE_SIZE or not: Qt scales to fit) */
+GdkPixbuf *gtk_icon_info_load_icon (GtkIconInfo *i, GError **error)
+{
+  if (!i) return nullptr;
+  int size = i->size > 0 ? i->size : 16;
+  if (i->builtin) {
+    int w = gdk_pixbuf_get_width (i->builtin), h = gdk_pixbuf_get_height (i->builtin);
+    if (w == size || !(i->flags & GTK_ICON_LOOKUP_FORCE_SIZE)) return (GdkPixbuf *) g_object_ref (i->builtin);
+    return gdk_pixbuf_scale_simple (i->builtin, size, qMax (1, h * size / qMax (1, w)), GDK_INTERP_BILINEAR);
+  }
+  QIcon icon = i->filename ? QIcon (QString::fromUtf8 (i->filename)) : gtkqt_icon (i->name);
+  if (icon.isNull () && i->name) icon = gtkqt_icon (i->name);
+  QPixmap pm = icon.pixmap (size, size);
+  if (pm.isNull ()) {
+    g_set_error (error, GTK_ICON_THEME_ERROR, GTK_ICON_THEME_FAILED, "Failed to load icon '%s'", i->name ? i->name : "");
+    return nullptr;
+  }
+  return gtkqt_pixbuf_from_image (pm.toImage ().convertToFormat (QImage::Format_ARGB32));
+}
+
+GdkPixbuf *gtk_icon_info_load_symbolic (GtkIconInfo *i, const GdkRGBA *, const GdkRGBA *, const GdkRGBA *, const GdkRGBA *,
+                                        gboolean *was_symbolic, GError **error)
+{
+  if (was_symbolic) *was_symbolic = i && i->name && g_str_has_suffix (i->name, "-symbolic");
+  return gtk_icon_info_load_icon (i, error);
+}
+
+gboolean gtk_icon_size_lookup_for_settings (GtkSettings *, GtkIconSize size, gint *width, gint *height)
+{
+  return gtk_icon_size_lookup (size, width, height);
+}
+
+} /* extern "C" */
+extern "C" {
 
 void gtk_window_set_icon (GtkWindow *window, GdkPixbuf *icon)
 {
@@ -2047,6 +2301,25 @@ void gtk_drag_dest_set (GtkWidget *widget, GtkDestDefaults flags, const GtkTarge
 }
 
 void gtk_drag_dest_unset (GtkWidget *widget) { g_object_set_data (G_OBJECT (widget), "gtkqt-drop", nullptr); }
+
+/* GTK's standard targets added to a destination's list (info 0) */
+static void drop_add (GtkWidget *widget, std::initializer_list<const char *> names)
+{
+  auto *dd = static_cast<DropData *> (g_object_get_data (G_OBJECT (widget), "gtkqt-drop"));
+  if (!dd) {
+    gtk_drag_dest_set (widget, (GtkDestDefaults) 0, nullptr, 0, GDK_ACTION_COPY);
+    dd = static_cast<DropData *> (g_object_get_data (G_OBJECT (widget), "gtkqt-drop"));
+  }
+  if (!dd) return;
+  for (const char *n : names) {
+    bool have = false;
+    for (const DropTarget &t : dd->targets) if (t.name == n) have = true;
+    if (!have) dd->targets << DropTarget { QByteArray (n), 0, 0 };
+  }
+}
+void gtk_drag_dest_add_uri_targets (GtkWidget *widget) { drop_add (widget, { "text/uri-list" }); }
+void gtk_drag_dest_add_text_targets (GtkWidget *widget) { drop_add (widget, { "UTF8_STRING", "text/plain;charset=utf-8", "text/plain", "STRING", "TEXT" }); }
+void gtk_drag_dest_add_image_targets (GtkWidget *widget) { drop_add (widget, { "image/png", "image/jpeg", "image/bmp" }); }
 void gtk_drag_finish (GdkDragContext *, gboolean, gboolean, guint32) {}
 void gtk_drag_get_data (GtkWidget *, GdkDragContext *, GdkAtom, guint32) {}
 void gtk_drag_highlight (GtkWidget *) {}
@@ -3708,3 +3981,56 @@ void gdk_window_thaw_updates (GdkWindow *window) { if (QWidget *qw = drawable_qw
 
 } /* extern "C" */
 
+
+/* ======================================================================
+ * Odds and ends of GTK 3 the desktop provides
+ * ====================================================================== */
+guint32 gtkqt_last_event_time = 0;
+
+extern "C" {
+
+guint32 gtk_get_current_event_time (void) { return gtkqt_last_event_time; }
+
+gboolean gtk_show_uri_on_window (GtkWindow *, const char *uri, guint32, GError **error)
+{
+  if (uri && QDesktopServices::openUrl (QUrl::fromUserInput (QString::fromUtf8 (uri)))) return TRUE;
+  g_set_error (error, G_IO_ERROR, G_IO_ERROR_FAILED, "Cannot open %s", uri ? uri : "");
+  return FALSE;
+}
+
+/* GTK asks the window manager for attention */
+void gtk_window_set_urgency_hint (GtkWindow *window, gboolean setting)
+{
+  g_object_set_data (G_OBJECT (window), "gtkqt-urgent", GINT_TO_POINTER (setting));
+  if (QWidget *qw = setting ? gtkqt_qw (GTK_WIDGET (window)) : nullptr) QApplication::alert (qw);
+}
+gboolean gtk_window_get_urgency_hint (GtkWindow *window) { return GPOINTER_TO_INT (g_object_get_data (G_OBJECT (window), "gtkqt-urgent")); }
+
+/* the widget's colours from its Qt palette */
+static QColor context_color (GtkStyleContext *context, GtkStateFlags state, bool background)
+{
+  QWidget *qw = context ? gtkqt_qw ((GtkWidget *) context) : nullptr;
+  QPalette pal = qw ? qw->palette () : QApplication::palette ();
+  QPalette::ColorGroup g = (state & GTK_STATE_FLAG_INSENSITIVE) ? QPalette::Disabled
+                           : (state & GTK_STATE_FLAG_BACKDROP) ? QPalette::Inactive : QPalette::Active;
+  if (state & GTK_STATE_FLAG_SELECTED) return pal.color (g, background ? QPalette::Highlight : QPalette::HighlightedText);
+  if (qw && (qobject_cast<QAbstractScrollArea *> (qw) || qobject_cast<QLineEdit *> (qw)))
+    return pal.color (g, background ? QPalette::Base : QPalette::Text);
+  return pal.color (g, background ? QPalette::Window : QPalette::WindowText);
+}
+void gtk_style_context_get_color (GtkStyleContext *context, GtkStateFlags state, GdkRGBA *color)
+{
+  if (!color) return;
+  QColor c = context_color (context, state, false);
+  *color = GdkRGBA { c.redF (), c.greenF (), c.blueF (), c.alphaF () };
+}
+void gtk_style_context_get_background_color (GtkStyleContext *context, GtkStateFlags state, GdkRGBA *color)
+{
+  if (!color) return;
+  QColor c = context_color (context, state, true);
+  *color = GdkRGBA { c.redF (), c.greenF (), c.blueF (), c.alphaF () };
+}
+
+GtkClipboard *gtk_clipboard_get_for_display (GdkDisplay *, GdkAtom selection) { return gtk_clipboard_get (selection); }
+
+} /* extern "C" */

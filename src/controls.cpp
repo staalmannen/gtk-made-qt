@@ -82,6 +82,12 @@ static void label_refresh (GtkWidget *w)
     if (d->underline) t = gtkqt_mnemonic (raw.constData ()).remove (QRegularExpression (QStringLiteral ("&(?!&)"))).replace (QStringLiteral ("&&"), QStringLiteral ("&"));
     l->setText (t);
   }
+  if (g_object_get_data (G_OBJECT (w), "gtkqt-single-line")) {
+    QString t = l->text ();
+    t.replace (QLatin1Char ('\n'), QLatin1Char (' '));
+    t.replace (QRegularExpression (QStringLiteral ("<br\\s*/?>"), QRegularExpression::CaseInsensitiveOption), QStringLiteral (" "));
+    l->setText (t);
+  }
 }
 
 G_DEFINE_TYPE (GtkLabel, gtk_label, GTK_TYPE_WIDGET)
@@ -194,6 +200,20 @@ void gtk_label_set_use_markup (GtkLabel *label, gboolean setting)
   label_data (GTK_WIDGET (label))->markup = setting;
   label_refresh (GTK_WIDGET (label));
 }
+
+gboolean gtk_label_get_use_markup (GtkLabel *label) { return label_data (GTK_WIDGET (label))->markup; }
+
+/* one line: no wrapping, line breaks shown as spaces */
+void gtk_label_set_single_line_mode (GtkLabel *label, gboolean single)
+{
+  g_object_set_data (G_OBJECT (label), "gtkqt-single-line", GINT_TO_POINTER (single));
+  if (auto *l = gtkqt_q<QLabel> (GTK_WIDGET (label))) {
+    if (single) l->setWordWrap (false);
+    l->setSizePolicy (l->sizePolicy ().horizontalPolicy (), single ? QSizePolicy::Fixed : QSizePolicy::Preferred);
+  }
+  label_refresh (GTK_WIDGET (label));
+}
+gboolean gtk_label_get_single_line_mode (GtkLabel *label) { return GPOINTER_TO_INT (g_object_get_data (G_OBJECT (label), "gtkqt-single-line")); }
 
 void gtk_label_set_use_underline (GtkLabel *label, gboolean setting)
 {
@@ -715,6 +735,7 @@ void gtk_button_set_image (GtkButton *button, GtkWidget *image)
   }
   g_object_ref_sink (image);
   g_object_set_data_full (G_OBJECT (button), "gtkqt-image", image, g_object_unref);
+  g_object_set_data (G_OBJECT (image), "gtkqt-image-button", button);   /* the button holds the image */
 }
 
 void gtk_button_set_always_show_image (GtkButton *, gboolean) {}
@@ -1275,6 +1296,7 @@ static void gtk_entry_class_init (GtkEntryClass *klass)
   g_signal_new ("changed", t, G_SIGNAL_RUN_LAST, 0, nullptr, nullptr, nullptr, G_TYPE_NONE, 0);
   g_signal_new ("activate", t, (GSignalFlags) (G_SIGNAL_RUN_LAST | G_SIGNAL_ACTION), 0, nullptr, nullptr, nullptr, G_TYPE_NONE, 0);
   g_signal_new ("icon-press", t, G_SIGNAL_RUN_LAST, 0, nullptr, nullptr, nullptr, G_TYPE_NONE, 2, G_TYPE_INT, G_TYPE_POINTER);
+  g_signal_new ("icon-release", t, G_SIGNAL_RUN_LAST, 0, nullptr, nullptr, nullptr, G_TYPE_NONE, 2, G_TYPE_INT, G_TYPE_POINTER);
   /* GtkEditable: the default handlers make the change */
   g_signal_new_class_handler ("insert-text", t, G_SIGNAL_RUN_LAST, G_CALLBACK (entry_real_insert_text), nullptr, nullptr, nullptr,
                               G_TYPE_NONE, 3, G_TYPE_STRING, G_TYPE_INT, G_TYPE_POINTER);
@@ -1402,16 +1424,33 @@ void gtk_entry_set_input_purpose (GtkEntry *entry, GtkInputPurpose purpose)
   if (purpose == GTK_INPUT_PURPOSE_PASSWORD || purpose == GTK_INPUT_PURPOSE_PIN) gtk_entry_set_visibility (entry, FALSE);
 }
 
+/* stock ids are icon names to gtkqt_icon */
+void gtk_entry_set_icon_from_stock (GtkEntry *entry, GtkEntryIconPosition icon_pos, const gchar *stock_id)
+{
+  gtk_entry_set_icon_from_icon_name (entry, icon_pos, stock_id);
+}
+
 void gtk_entry_set_icon_from_icon_name (GtkEntry *entry, GtkEntryIconPosition icon_pos, const gchar *icon_name)
 {
   QLineEdit *l = editable_line (GTK_EDITABLE (entry));
-  if (!l || !icon_name) return;
+  if (!l) return;
+  /* one icon per side: a new one replaces it, NULL removes it */
+  const char *key = icon_pos == GTK_ENTRY_ICON_PRIMARY ? "gtkqt-icon-primary" : "gtkqt-icon-secondary";
+  if (auto *old = static_cast<QAction *> (g_object_get_data (G_OBJECT (entry), key))) {
+    l->removeAction (old);
+    delete old;
+    g_object_set_data (G_OBJECT (entry), key, nullptr);
+  }
+  if (!icon_name) return;
   QAction *a = l->addAction (gtkqt_icon (icon_name), icon_pos == GTK_ENTRY_ICON_PRIMARY ? QLineEdit::LeadingPosition : QLineEdit::TrailingPosition);
+  g_object_set_data (G_OBJECT (entry), key, a);
   gtkqt_connect ((GtkWidget *) entry, a, &QAction::triggered, [icon_pos] (GtkWidget *e, bool) {
     GdkEvent ev = {};
     ev.button.type = GDK_BUTTON_PRESS;
     ev.button.button = 1;
     g_signal_emit_by_name (e, "icon-press", (int) icon_pos, &ev);
+    ev.button.type = GDK_BUTTON_RELEASE;
+    g_signal_emit_by_name (e, "icon-release", (int) icon_pos, &ev);
   });
 }
 
@@ -2047,6 +2086,18 @@ static void gtk_image_class_init (GtkImageClass *klass)
               }, nullptr);
 }
 
+/* a button showing the image (gtk_button_set_image) follows its changes */
+static void image_owner_update (GtkImage *image)
+{
+  auto *button = (GtkWidget *) g_object_get_data (G_OBJECT (image), "gtkqt-image-button");
+  auto *b = button ? gtkqt_q<QAbstractButton> (button) : nullptr;
+  auto *l = gtkqt_q<QLabel> (GTK_WIDGET (image));
+  if (!b || !l) return;
+  QPixmap pm = l->pixmap (Qt::ReturnByValue);
+  b->setIcon (pm.isNull () ? QIcon () : QIcon (pm));
+  if (!pm.isNull ()) b->setIconSize (pm.size () / pm.devicePixelRatio ());
+}
+
 /* What the image shows, for the getters: GTK keeps one of these */
 static void image_reset (GtkImage *image, GtkImageType type)
 {
@@ -2070,6 +2121,7 @@ static void image_show_icon (GtkImage *image)
   /* an icon the theme lacks keeps its space, as GTK's missing-image does */
   if (icon.isNull ()) { l->clear (); l->setMinimumSize (px, px); }
   else l->setPixmap (icon.pixmap (px, px));
+  image_owner_update (image);
 }
 
 extern "C" {
@@ -2137,6 +2189,7 @@ void gtk_image_set_from_pixbuf (GtkImage *image, GdkPixbuf *pixbuf)
     if (pixbuf) l->setPixmap (QPixmap::fromImage (gtkqt_pixbuf_image (pixbuf)));
     else l->clear ();
   }
+  image_owner_update (image);
 }
 
 /* an animation plays: the iterator says which frame and for how long */

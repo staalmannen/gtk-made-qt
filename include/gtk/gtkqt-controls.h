@@ -12,6 +12,7 @@ G_BEGIN_DECLS
 /* GtkMisc (GTK 2/3): alignment/padding helpers for labels and images */
 typedef GtkWidget GtkMisc;
 #define GTK_MISC(o) ((GtkMisc *) (o))
+#define GTK_IS_MISC(o) (GTK_IS_LABEL (o) || GTK_IS_IMAGE (o) || GTK_IS_ARROW (o))
 void gtk_misc_set_alignment (GtkMisc *misc, gfloat xalign, gfloat yalign);
 void gtk_misc_set_padding (GtkMisc *misc, gint xpad, gint ypad);
 
@@ -27,6 +28,9 @@ void         gtk_label_set_text (GtkLabel *label, const gchar *str);
 const gchar *gtk_label_get_text (GtkLabel *label);
 void         gtk_label_set_label (GtkLabel *label, const gchar *str);
 const gchar *gtk_label_get_label (GtkLabel *label);
+gboolean     gtk_label_get_use_markup (GtkLabel *label);
+void         gtk_label_set_single_line_mode (GtkLabel *label, gboolean single_line_mode);
+gboolean     gtk_label_get_single_line_mode (GtkLabel *label);
 void         gtk_label_set_markup (GtkLabel *label, const gchar *str);
 void         gtk_label_set_markup_with_mnemonic (GtkLabel *label, const gchar *str);
 void         gtk_label_set_text_with_mnemonic (GtkLabel *label, const gchar *str);
@@ -234,6 +238,7 @@ void         gtk_entry_set_placeholder_text (GtkEntry *entry, const gchar *text)
 void         gtk_entry_set_alignment (GtkEntry *entry, gfloat xalign);
 void         gtk_entry_set_has_frame (GtkEntry *entry, gboolean setting);
 void         gtk_entry_set_input_purpose (GtkEntry *entry, GtkInputPurpose purpose);
+void         gtk_entry_set_icon_from_stock (GtkEntry *entry, GtkEntryIconPosition icon_pos, const gchar *stock_id);
 void         gtk_entry_set_icon_from_icon_name (GtkEntry *entry, GtkEntryIconPosition icon_pos, const gchar *icon_name);
 void         gtk_entry_select_region (GtkEntry *entry, gint start, gint end);
 void         gtk_entry_set_position (GtkEntry *entry, gint position);

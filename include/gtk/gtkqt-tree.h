@@ -34,6 +34,7 @@ typedef void (*GtkTreeSelectionForeachFunc) (GtkTreeModel *model, GtkTreePath *p
 typedef void (*GtkTreeCellDataFunc) (GtkTreeViewColumn *tree_column, GtkCellRenderer *cell, GtkTreeModel *tree_model,
                                      GtkTreeIter *iter, gpointer data);
 typedef gint (*GtkTreeIterCompareFunc) (GtkTreeModel *model, GtkTreeIter *a, GtkTreeIter *b, gpointer user_data);
+typedef gboolean (*GtkTreeViewRowSeparatorFunc) (GtkTreeModel *model, GtkTreeIter *iter, gpointer data);
 
 #define GTK_TYPE_TREE_MODEL   (gtk_tree_model_get_type ())
 #define GTK_TREE_MODEL(o)     (G_TYPE_CHECK_INSTANCE_CAST ((o), GTK_TYPE_TREE_MODEL, GtkTreeModel))
@@ -391,6 +392,16 @@ void gtk_cell_layout_pack_end (GtkCellLayout *cell_layout, GtkCellRenderer *cell
 void gtk_cell_layout_add_attribute (GtkCellLayout *cell_layout, GtkCellRenderer *cell, const gchar *attribute, gint column);
 void gtk_cell_layout_set_attributes (GtkCellLayout *cell_layout, GtkCellRenderer *cell, ...) G_GNUC_NULL_TERMINATED;
 void gtk_cell_layout_clear (GtkCellLayout *cell_layout);
+typedef void (*GtkCellLayoutDataFunc) (GtkCellLayout *cell_layout, GtkCellRenderer *cell, GtkTreeModel *tree_model,
+                                       GtkTreeIter *iter, gpointer data);
+void gtk_cell_layout_set_cell_data_func (GtkCellLayout *cell_layout, GtkCellRenderer *cell, GtkCellLayoutDataFunc func,
+                                         gpointer func_data, GDestroyNotify destroy);
+void gtk_cell_layout_clear_attributes (GtkCellLayout *cell_layout, GtkCellRenderer *cell);
+GList *gtk_cell_layout_get_cells (GtkCellLayout *cell_layout);
+void gtk_combo_box_set_row_separator_func (GtkComboBox *combo_box, GtkTreeViewRowSeparatorFunc func, gpointer data,
+                                           GDestroyNotify destroy);
+void gtk_combo_box_set_wrap_width (GtkComboBox *combo_box, gint width);
+gint gtk_combo_box_get_wrap_width (GtkComboBox *combo_box);
 GtkWidget    *gtk_combo_box_new_with_model (GtkTreeModel *model);
 void          gtk_combo_box_set_model (GtkComboBox *combo_box, GtkTreeModel *model);
 GtkTreeModel *gtk_combo_box_get_model (GtkComboBox *combo_box);
@@ -535,7 +546,24 @@ void               gtk_tree_view_set_headers_clickable (GtkTreeView *tree_view, 
 void               gtk_tree_view_set_rules_hint (GtkTreeView *tree_view, gboolean setting);
 void               gtk_tree_view_set_reorderable (GtkTreeView *tree_view, gboolean reorderable);
 void               gtk_tree_view_set_enable_search (GtkTreeView *tree_view, gboolean enable_search);
+gboolean           gtk_tree_view_get_enable_search (GtkTreeView *tree_view);
 void               gtk_tree_view_set_search_column (GtkTreeView *tree_view, gint column);
+gint               gtk_tree_view_get_search_column (GtkTreeView *tree_view);
+/* type-ahead search: FALSE from the function means the row matches */
+typedef gboolean (*GtkTreeViewSearchEqualFunc) (GtkTreeModel *model, gint column, const gchar *key, GtkTreeIter *iter,
+                                                gpointer search_data);
+void               gtk_tree_view_set_search_equal_func (GtkTreeView *tree_view, GtkTreeViewSearchEqualFunc search_equal_func,
+                                                        gpointer search_user_data, GDestroyNotify search_destroy);
+void               gtk_tree_view_set_row_separator_func (GtkTreeView *tree_view, GtkTreeViewRowSeparatorFunc func, gpointer data,
+                                                         GDestroyNotify destroy);
+/* tooltips of rows */
+void               gtk_tree_view_set_tooltip_column (GtkTreeView *tree_view, gint column);
+gint               gtk_tree_view_get_tooltip_column (GtkTreeView *tree_view);
+gboolean           gtk_tree_view_get_tooltip_context (GtkTreeView *tree_view, gint *x, gint *y, gboolean keyboard_tip,
+                                                      GtkTreeModel **model, GtkTreePath **path, GtkTreeIter *iter);
+void               gtk_tree_view_set_tooltip_row (GtkTreeView *tree_view, GtkTooltip *tooltip, GtkTreePath *path);
+void               gtk_tree_view_set_tooltip_cell (GtkTreeView *tree_view, GtkTooltip *tooltip, GtkTreePath *path,
+                                                   GtkTreeViewColumn *column, GtkCellRenderer *cell);
 void               gtk_tree_view_expand_all (GtkTreeView *tree_view);
 void               gtk_tree_view_collapse_all (GtkTreeView *tree_view);
 gboolean           gtk_tree_view_expand_row (GtkTreeView *tree_view, GtkTreePath *path, gboolean open_all);

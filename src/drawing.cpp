@@ -585,6 +585,13 @@ guint32 gdk_event_get_time (GdkEvent *e)
   }
 }
 
+GdkEvent *gdk_event_new (GdkEventType type)
+{
+  auto *e = g_new0 (GdkEvent, 1);
+  e->type = type;
+  return e;
+}
+
 GdkEvent *gdk_event_copy (GdkEvent *event)
 {
   auto *c = (GdkEvent *) g_memdup2 (event, sizeof (GdkEvent));
@@ -896,5 +903,10 @@ void gdk_threads_enter (void) { gtkqt_threads_enter (); }
 void gdk_threads_leave (void) { gtkqt_threads_leave (); }
 guint gdk_threads_add_idle (GSourceFunc function, gpointer data) { return g_idle_add (function, data); }
 guint gdk_threads_add_timeout (guint interval, GSourceFunc function, gpointer data) { return g_timeout_add (interval, function, data); }
+guint gdk_threads_add_timeout_seconds (guint interval, GSourceFunc function, gpointer data) { return g_timeout_add_seconds (interval, function, data); }
+guint gdk_threads_add_timeout_seconds_full (gint priority, guint interval, GSourceFunc function, gpointer data, GDestroyNotify notify)
+{
+  return g_timeout_add_seconds_full (priority, interval, function, data, notify);
+}
 
 } /* extern "C" */

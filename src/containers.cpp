@@ -211,6 +211,11 @@ void gtkqt_window_before_show (GtkWidget *w)
   });
   /* the window's full request, as GTK sizes it (adjustSize stops at 2/3
    * of the screen); only the screen itself limits it */
+  /* requests changed since the layouts last looked (size requests set
+   * before showing) reach them only through posted events: look again */
+  for (QWidget *c : qw->findChildren<QWidget *> ()) c->updateGeometry ();   /* the layouts' cached child sizes */
+  for (QLayout *l : qw->findChildren<QLayout *> ()) l->invalidate ();
+  if (qw->layout ()) qw->layout ()->invalidate ();
   QSize want = qw->sizeHint ().expandedTo (qw->minimumSizeHint ());
   if (!want.isValid ()) qw->adjustSize ();
   else {

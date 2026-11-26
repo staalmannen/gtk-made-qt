@@ -145,6 +145,7 @@ static void action_finalize (GObject *o)
   delete act (o);
   G_OBJECT_CLASS (gtk_action_parent_class)->finalize (o);
 }
+static void action_set_active (GtkAction *a, bool on, bool emit);
 static void gtk_action_class_init (GtkActionClass *klass)
 {
   G_OBJECT_CLASS (klass)->finalize = action_finalize;
@@ -160,6 +161,32 @@ static void gtk_action_class_init (GtkActionClass *klass)
               [] (GObject *o, const GValue *v) { act (o)->tooltip = gtkqt_str (g_value_get_string (v)); }, nullptr);
   gtkqt_prop (klass, g_param_spec_string ("stock-id", nullptr, nullptr, nullptr, RW),
               [] (GObject *o, const GValue *v) { act (o)->stock = gtkqt_str (g_value_get_string (v)); }, nullptr);
+  gtkqt_prop (klass, g_param_spec_string ("icon-name", nullptr, nullptr, nullptr, RW),
+              [] (GObject *o, const GValue *v) { if (g_value_get_string (v)) act (o)->stock = gtkqt_str (g_value_get_string (v)); }, nullptr);
+  gtkqt_prop (klass, g_param_spec_string ("short-label", nullptr, nullptr, nullptr, RW), [] (GObject *, const GValue *) {}, nullptr);
+  gtkqt_prop (klass, g_param_spec_boolean ("sensitive", nullptr, nullptr, TRUE, RW),
+              [] (GObject *o, const GValue *v) { gtk_action_set_sensitive ((GtkAction *) o, g_value_get_boolean (v)); },
+              [] (GObject *o, GValue *v) { g_value_set_boolean (v, act (o)->sensitive); });
+  gtkqt_prop (klass, g_param_spec_boolean ("visible", nullptr, nullptr, TRUE, RW),
+              [] (GObject *o, const GValue *v) { gtk_action_set_visible ((GtkAction *) o, g_value_get_boolean (v)); },
+              [] (GObject *o, GValue *v) { g_value_set_boolean (v, act (o)->visible); });
+  gtkqt_prop (klass, g_param_spec_boolean ("active", nullptr, nullptr, FALSE, RW),
+              [] (GObject *o, const GValue *v) { action_set_active ((GtkAction *) o, g_value_get_boolean (v), true); },
+              [] (GObject *o, GValue *v) { g_value_set_boolean (v, act (o)->active); });
+  gtkqt_prop (klass, g_param_spec_int ("value", nullptr, nullptr, G_MININT, G_MAXINT, 0, RW),
+              [] (GObject *o, const GValue *v) { act (o)->radio_value = g_value_get_int (v); },
+              [] (GObject *o, GValue *v) { g_value_set_int (v, act (o)->radio_value); });
+  /* important actions show their label beside the icon in toolbars */
+  gtkqt_prop (klass, g_param_spec_boolean ("is-important", nullptr, nullptr, FALSE, RW),
+              [] (GObject *o, const GValue *v) {
+                g_object_set_data (o, "gtkqt-important", GINT_TO_POINTER (g_value_get_boolean (v)));
+                for (GSList *l = (GSList *) g_object_get_data (o, "gtkqt-tool-proxies"); l; l = l->next)
+                  gtk_tool_item_set_is_important (GTK_TOOL_ITEM (l->data), g_value_get_boolean (v));
+              },
+              [] (GObject *o, GValue *v) { g_value_set_boolean (v, GPOINTER_TO_INT (g_object_get_data (o, "gtkqt-important"))); });
+  for (const char *name : { "hide-if-empty", "visible-horizontal", "visible-vertical", "visible-overflown", "always-show-image",
+                            "draw-as-radio" })
+    gtkqt_prop (klass, g_param_spec_boolean (name, nullptr, nullptr, TRUE, RW), [] (GObject *, const GValue *) {}, nullptr);
 }
 
 GType gtk_toggle_action_get_type (void) { return gtk_action_get_type (); }
@@ -207,12 +234,20 @@ void gtk_action_set_sensitive (GtkAction *action, gboolean sensitive)
 {
   act (action)->sensitive = sensitive;
   for (const QPointer<QAction> &p : act (action)->proxies) if (p) p->setEnabled (sensitive);
+  for (GSList *l = (GSList *) g_object_get_data (G_OBJECT (action), "gtkqt-widget-proxies"); l; l = l->next)
+    gtk_widget_set_sensitive (GTK_WIDGET (l->data), sensitive);
 }
 
+gboolean gtk_action_get_sensitive (GtkAction *action) { return act (action)->sensitive; }
+gboolean gtk_action_is_sensitive (GtkAction *action) { return act (action)->sensitive; }
+gboolean gtk_action_get_visible (GtkAction *action) { return act (action)->visible; }
+gboolean gtk_action_is_visible (GtkAction *action) { return act (action)->visible; }
 void gtk_action_set_visible (GtkAction *action, gboolean visible)
 {
   act (action)->visible = visible;
   for (const QPointer<QAction> &p : act (action)->proxies) if (p) p->setVisible (visible);
+  for (GSList *l = (GSList *) g_object_get_data (G_OBJECT (action), "gtkqt-widget-proxies"); l; l = l->next)
+    gtk_widget_set_visible (GTK_WIDGET (l->data), visible);
 }
 
 gboolean gtk_toggle_action_get_active (GtkToggleAction *action) { return act (action)->active; }
@@ -308,6 +343,26 @@ void gtk_action_group_add_radio_actions (GtkActionGroup *g, const GtkRadioAction
   for (GtkAction *a : made) g_object_unref (a);
 }
 
+GList *gtk_action_group_list_actions (GtkActionGroup *g)
+{
+  GList *l = nullptr;
+  for (GtkAction *a : grp (g)->actions) l = g_list_append (l, a);
+  return l;
+}
+
+/* the value of the group's active member */
+gint gtk_radio_action_get_current_value (GtkRadioAction *action)
+{
+  for (GSList *l = act (action)->radio_group; l; l = l->next)
+    if (act (l->data)->active) return act (l->data)->radio_value;
+  return act (action)->active ? act (action)->radio_value : 0;
+}
+void gtk_radio_action_set_current_value (GtkRadioAction *action, gint value)
+{
+  for (GSList *l = act (action)->radio_group; l; l = l->next)
+    if (act (l->data)->radio_value == value) { gtk_toggle_action_set_active ((GtkToggleAction *) l->data, TRUE); return; }
+}
+
 GtkAction *gtk_action_group_get_action (GtkActionGroup *g, const gchar *action_name)
 {
   for (GtkAction *a : grp (g)->actions) if (act (a)->name == gtkqt_str (action_name)) return a;
@@ -369,6 +424,16 @@ static void proxy_bind (GtkUIManager *m, GtkWidget *w, GtkAction *a)
       gtkqt_accel_group_add_action (gtk_ui_manager_get_accel_group (m), qa);
     }
     if (d->toggle) { qa->setCheckable (true); qa->setChecked (d->active); }
+  } else {
+    /* tool items: the action's sensitivity and visibility */
+    gtk_widget_set_sensitive (w, d->sensitive);
+    gtk_widget_set_visible (w, d->visible);
+    auto *list = (GSList *) g_object_steal_data (G_OBJECT (a), "gtkqt-widget-proxies");
+    g_object_set_data_full (G_OBJECT (a), "gtkqt-widget-proxies", g_slist_prepend (list, w), (GDestroyNotify) g_slist_free);
+    g_object_weak_ref (G_OBJECT (w), [] (gpointer action, GObject *gone) {
+      auto *l = (GSList *) g_object_steal_data (G_OBJECT (action), "gtkqt-widget-proxies");
+      g_object_set_data_full (G_OBJECT (action), "gtkqt-widget-proxies", g_slist_remove (l, gone), (GDestroyNotify) g_slist_free);
+    }, a);
   }
   g_signal_connect_object (w, GTK_IS_MENU_ITEM (w) ? "activate" : "clicked",
                            G_CALLBACK (+[] (GtkWidget *, gpointer action) { gtk_action_activate (GTK_ACTION (action)); }),
@@ -437,6 +502,14 @@ static bool ui_parse (GtkUIManager *m, const QByteArray &xml, GError **error)
         if (!act (a)->stock.isEmpty ()) gtk_tool_button_set_icon_name (GTK_TOOL_BUTTON (item), act (a)->stock.toUtf8 ().constData ());
         if (!act (a)->tooltip.isEmpty ()) gtk_tool_item_set_tooltip_text (item, act (a)->tooltip.toUtf8 ().constData ());
         proxy_bind (m, GTK_WIDGET (item), a);
+        /* the action's is-important labels the item beside its icon */
+        auto *list = (GSList *) g_object_steal_data (G_OBJECT (a), "gtkqt-tool-proxies");
+        g_object_set_data_full (G_OBJECT (a), "gtkqt-tool-proxies", g_slist_prepend (list, item), (GDestroyNotify) g_slist_free);
+        g_object_weak_ref (G_OBJECT (item), [] (gpointer action, GObject *gone) {
+          auto *l = (GSList *) g_object_steal_data (G_OBJECT (action), "gtkqt-tool-proxies");
+          g_object_set_data_full (G_OBJECT (action), "gtkqt-tool-proxies", g_slist_remove (l, gone), (GDestroyNotify) g_slist_free);
+        }, a);
+        if (g_object_get_data (G_OBJECT (a), "gtkqt-important")) gtk_tool_item_set_is_important (item, TRUE);
       }
       gtk_widget_show (GTK_WIDGET (item));
       gtk_toolbar_insert (GTK_TOOLBAR (shell), item, -1);
@@ -472,6 +545,28 @@ void gtk_ui_manager_insert_action_group (GtkUIManager *m, GtkActionGroup *g, gin
   g_object_ref (g);
   if (pos < 0 || pos > ui (m)->groups.size ()) ui (m)->groups.append (g);
   else ui (m)->groups.insert (pos, g);
+}
+
+GList *gtk_ui_manager_get_action_groups (GtkUIManager *m)
+{
+  /* the manager's own list, as GTK returns it (not to be freed) */
+  auto *l = (GList *) g_object_get_data (G_OBJECT (m), "gtkqt-group-list");
+  g_list_free (l);
+  l = nullptr;
+  for (GtkActionGroup *g : ui (m)->groups) l = g_list_append (l, g);
+  g_object_set_data_full (G_OBJECT (m), "gtkqt-group-list", l, (GDestroyNotify) g_list_free);
+  return l;
+}
+
+guint gtk_ui_manager_add_ui_from_resource (GtkUIManager *m, const gchar *resource_path, GError **error)
+{
+  GBytes *b = g_resources_lookup_data (resource_path, G_RESOURCE_LOOKUP_FLAGS_NONE, error);
+  if (!b) return 0;
+  gsize n = 0;
+  const char *data = (const char *) g_bytes_get_data (b, &n);
+  guint id = gtk_ui_manager_add_ui_from_string (m, data, (gssize) n, error);
+  g_bytes_unref (b);
+  return id;
 }
 
 guint gtk_ui_manager_add_ui_from_string (GtkUIManager *m, const gchar *buffer, gssize length, GError **error)

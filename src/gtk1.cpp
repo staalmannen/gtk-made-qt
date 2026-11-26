@@ -420,7 +420,24 @@ gboolean gtk_widget_event (GtkWidget *widget, GdkEvent *event)
   case GDK_SCROLL: sig = "scroll-event"; break;
   default: return FALSE;
   }
-  return gtkqt_emit_event (widget, event, sig);
+  gboolean handled = gtkqt_emit_event (widget, event, sig);
+  if (handled || (event->type != GDK_KEY_PRESS && event->type != GDK_KEY_RELEASE)) return handled;
+  /* GTK's own key handling: the bindings, then the widget's (here Qt's) */
+  if (event->type == GDK_KEY_PRESS && gtkqt_bindings_activate (widget, event->key.keyval, event->key.state)) return TRUE;
+  QWidget *qw = gtkqt_qw (widget);
+  if (!qw) return FALSE;
+  int key = gtkqt_keyval_to_qt_key (event->key.keyval);
+  Qt::KeyboardModifiers mods;
+  if (event->key.state & GDK_SHIFT_MASK) mods |= Qt::ShiftModifier;
+  if (event->key.state & GDK_CONTROL_MASK) mods |= Qt::ControlModifier;
+  if (event->key.state & GDK_MOD1_MASK) mods |= Qt::AltModifier;
+  mods |= Qt::KeyboardModifiers (key & Qt::KeypadModifier);
+  QString text = event->key.string ? QString::fromUtf8 (event->key.string, event->key.length) : QString ();
+  QKeyEvent ke (event->type == GDK_KEY_PRESS ? QEvent::KeyPress : QEvent::KeyRelease, key & ~Qt::KeypadModifier, mods, text);
+  gtkqt_synthetic_key = true;   /* the bridge does not emit the signal again */
+  QCoreApplication::sendEvent (qw->focusProxy () ? qw->focusProxy () : qw, &ke);
+  gtkqt_synthetic_key = false;
+  return ke.isAccepted ();
 }
 
 void gtk_widget_set_default_colormap (GdkColormap *) {}

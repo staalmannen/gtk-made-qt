@@ -1038,7 +1038,11 @@ void gtk_menu_button_set_label (GtkMenuButton *menu_button, const char *label)
 static QObject *toolbar_create (GtkWidget *)
 {
   auto *t = new QToolBar;
-  t->setToolButtonStyle (Qt::ToolButtonTextUnderIcon);
+  /* GTK 2's toolbars label every item below its icon; GTK 3's (both-horiz)
+   * only the important ones, beside it; icons are LARGE_TOOLBAR */
+  t->setToolButtonStyle (gtkqt_api >= 3 ? Qt::ToolButtonTextBesideIcon : Qt::ToolButtonTextUnderIcon);
+  int px = gtkqt_icon_size_px (GTK_ICON_SIZE_LARGE_TOOLBAR);
+  t->setIconSize (QSize (px, px));
   t->setMovable (false);
   return t;
 }

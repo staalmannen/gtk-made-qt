@@ -77,6 +77,8 @@ typedef enum { GTK_INPUT_PURPOSE_FREE_FORM, GTK_INPUT_PURPOSE_ALPHA, GTK_INPUT_P
   GTK_INPUT_PURPOSE_PIN } GtkInputPurpose;
 typedef enum { GTK_ENTRY_ICON_PRIMARY, GTK_ENTRY_ICON_SECONDARY } GtkEntryIconPosition;
 typedef enum { GTK_TREE_VIEW_COLUMN_GROW_ONLY, GTK_TREE_VIEW_COLUMN_AUTOSIZE, GTK_TREE_VIEW_COLUMN_FIXED } GtkTreeViewColumnSizing;
+GType gtk_tree_view_column_sizing_get_type (void) G_GNUC_CONST;
+#define GTK_TYPE_TREE_VIEW_COLUMN_SIZING (gtk_tree_view_column_sizing_get_type ())
 typedef enum { GTK_TREE_MODEL_ITERS_PERSIST = 1 << 0, GTK_TREE_MODEL_LIST_ONLY = 1 << 1 } GtkTreeModelFlags;
 
 /* Pango enums that leak into the GTK API */

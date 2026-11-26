@@ -228,6 +228,21 @@ void       gtk_widget_set_tooltip_text (GtkWidget *widget, const gchar *text);
 gchar     *gtk_widget_get_tooltip_text (GtkWidget *widget);
 void       gtk_widget_set_tooltip_markup (GtkWidget *widget, const gchar *markup);
 void       gtk_widget_set_has_tooltip (GtkWidget *widget, gboolean has_tooltip);
+gboolean   gtk_widget_get_has_tooltip (GtkWidget *widget);
+void       gtk_widget_trigger_tooltip_query (GtkWidget *widget);
+/* GtkTooltip: what a "query-tooltip" handler puts into the tooltip */
+#define GTK_TYPE_TOOLTIP (gtk_tooltip_get_type ())
+#define GTK_TOOLTIP(o)   (G_TYPE_CHECK_INSTANCE_CAST ((o), GTK_TYPE_TOOLTIP, GtkTooltip))
+#define GTK_IS_TOOLTIP(o) (G_TYPE_CHECK_INSTANCE_TYPE ((o), GTK_TYPE_TOOLTIP))
+GType      gtk_tooltip_get_type (void) G_GNUC_CONST;
+void       gtk_tooltip_set_text (GtkTooltip *tooltip, const gchar *text);
+void       gtk_tooltip_set_markup (GtkTooltip *tooltip, const gchar *markup);
+void       gtk_tooltip_set_icon (GtkTooltip *tooltip, GdkPixbuf *pixbuf);
+void       gtk_tooltip_set_icon_from_icon_name (GtkTooltip *tooltip, const gchar *icon_name, GtkIconSize size);
+void       gtk_tooltip_set_icon_from_stock (GtkTooltip *tooltip, const gchar *stock_id, GtkIconSize size);
+void       gtk_tooltip_set_custom (GtkTooltip *tooltip, GtkWidget *custom_widget);
+void       gtk_tooltip_set_tip_area (GtkTooltip *tooltip, const GdkRectangle *rect);
+void       gtk_tooltip_trigger_tooltip_query (GdkDisplay *display);
 void       gtk_widget_set_name (GtkWidget *widget, const gchar *name);
 const gchar *gtk_widget_get_name (GtkWidget *widget);
 GtkWidget *gtk_widget_get_parent (GtkWidget *widget);

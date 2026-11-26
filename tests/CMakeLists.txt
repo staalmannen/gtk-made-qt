@@ -89,3 +89,9 @@ set_tests_properties(css PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen" TIME
 gtkqt_add_program(test-treemodel ${CMAKE_CURRENT_SOURCE_DIR}/test-treemodel.c 3)
 add_test(NAME treemodel COMMAND test-treemodel)
 set_tests_properties(treemodel PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen" TIMEOUT 60)
+
+# GTK 3 odds and ends (Transmission): icon theme, tooltips, type-ahead,
+# combo separators, file chooser buttons, actions on tool items
+gtkqt_add_program(test-gtk3misc ${CMAKE_CURRENT_SOURCE_DIR}/test-gtk3misc.c 3)
+add_test(NAME gtk3misc COMMAND test-gtk3misc)
+set_tests_properties(gtk3misc PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen" TIMEOUT 60)

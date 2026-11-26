@@ -170,7 +170,12 @@ static void builtin_paint (GtkCellRenderer *c, QPainter *p, GtkWidget *w, const 
   case R_PIXBUF: {
     QPixmap pm = cell_pixmap (c, w);
     if (pm.isNull ()) break;
-    if (!sensitive) pm = st->generatedIconPixmap (QIcon::Disabled, pm, nullptr);
+    if (!sensitive) {
+      QStyleOption so;   /* the style reads the palette from it */
+      if (qw) so.initFrom (qw);
+      so.palette = pal;
+      pm = st->generatedIconPixmap (QIcon::Disabled, pm, &so);
+    }
     p->drawPixmap (aligned (pm.size () / pm.devicePixelRatio ()), pm);
     break;
   }
@@ -524,6 +529,8 @@ static void text_class_init (GtkCellRendererClass *klass)
               [] (GObject *o, const GValue *v) { rd (o)->ellipsize = g_value_get_enum (v); },
               [] (GObject *o, GValue *v) { g_value_set_enum (v, rd (o)->ellipsize); });
   /* accepted; Qt's item painting decides */
+  gtkqt_prop (klass, g_param_spec_enum ("alignment", nullptr, nullptr, PANGO_TYPE_ALIGNMENT, PANGO_ALIGN_LEFT, RW),
+              [] (GObject *, const GValue *) {}, nullptr);
   for (const char *name : { "wrap-width", "width-chars", "max-width-chars", "rise", "stretch", "style", "variant" })
     gtkqt_prop (klass, g_param_spec_int (name, nullptr, nullptr, -G_MAXINT, G_MAXINT, 0, RW), [] (GObject *, const GValue *) {}, nullptr);
   for (const char *name : { "foreground-set", "background-set", "weight-set", "ellipsize-set", "strikethrough", "underline-set",
@@ -845,6 +852,31 @@ static void gtk_tree_view_column_class_init (GtkTreeViewColumnClass *klass)
               [] (GObject *o, const GValue *v) { gtk_tree_view_column_set_expand ((GtkTreeViewColumn *) o, g_value_get_boolean (v)); }, nullptr);
   gtkqt_prop (klass, g_param_spec_boolean ("resizable", nullptr, nullptr, FALSE, RW),
               [] (GObject *o, const GValue *v) { gtk_tree_view_column_set_resizable ((GtkTreeViewColumn *) o, g_value_get_boolean (v)); }, nullptr);
+  gtkqt_prop (klass, g_param_spec_enum ("sizing", nullptr, nullptr, gtk_tree_view_column_sizing_get_type (), GTK_TREE_VIEW_COLUMN_GROW_ONLY, RW),
+              [] (GObject *o, const GValue *v) { gtk_tree_view_column_set_sizing ((GtkTreeViewColumn *) o, (GtkTreeViewColumnSizing) g_value_get_enum (v)); },
+              [] (GObject *o, GValue *v) { g_value_set_enum (v, ((GtkTreeViewColumn *) o)->column_type); });
+  gtkqt_prop (klass, g_param_spec_int ("fixed-width", nullptr, nullptr, -1, G_MAXINT, -1, RW),
+              [] (GObject *o, const GValue *v) { gtk_tree_view_column_set_fixed_width ((GtkTreeViewColumn *) o, g_value_get_int (v)); },
+              [] (GObject *o, GValue *v) { g_value_set_int (v, ((GtkTreeViewColumn *) o)->fixed_width); });
+  gtkqt_prop (klass, g_param_spec_int ("min-width", nullptr, nullptr, -1, G_MAXINT, -1, RW),
+              [] (GObject *o, const GValue *v) { gtk_tree_view_column_set_min_width ((GtkTreeViewColumn *) o, g_value_get_int (v)); }, nullptr);
+  gtkqt_prop (klass, g_param_spec_int ("max-width", nullptr, nullptr, -1, G_MAXINT, -1, RW),
+              [] (GObject *o, const GValue *v) { gtk_tree_view_column_set_max_width ((GtkTreeViewColumn *) o, g_value_get_int (v)); }, nullptr);
+  gtkqt_prop (klass, g_param_spec_boolean ("visible", nullptr, nullptr, TRUE, RW),
+              [] (GObject *o, const GValue *v) { gtk_tree_view_column_set_visible ((GtkTreeViewColumn *) o, g_value_get_boolean (v)); },
+              [] (GObject *o, GValue *v) { g_value_set_boolean (v, ((GtkTreeViewColumn *) o)->visible); });
+  gtkqt_prop (klass, g_param_spec_boolean ("clickable", nullptr, nullptr, FALSE, RW),
+              [] (GObject *o, const GValue *v) { gtk_tree_view_column_set_clickable ((GtkTreeViewColumn *) o, g_value_get_boolean (v)); }, nullptr);
+  gtkqt_prop (klass, g_param_spec_boolean ("reorderable", nullptr, nullptr, FALSE, RW),
+              [] (GObject *o, const GValue *v) { gtk_tree_view_column_set_reorderable ((GtkTreeViewColumn *) o, g_value_get_boolean (v)); }, nullptr);
+  gtkqt_prop (klass, g_param_spec_boolean ("sort-indicator", nullptr, nullptr, FALSE, RW),
+              [] (GObject *o, const GValue *v) { gtk_tree_view_column_set_sort_indicator ((GtkTreeViewColumn *) o, g_value_get_boolean (v)); }, nullptr);
+  gtkqt_prop (klass, g_param_spec_float ("alignment", nullptr, nullptr, 0, 1, 0, RW),
+              [] (GObject *o, const GValue *v) { gtk_tree_view_column_set_alignment ((GtkTreeViewColumn *) o, g_value_get_float (v)); }, nullptr);
+  gtkqt_prop (klass, g_param_spec_int ("spacing", nullptr, nullptr, 0, G_MAXINT, 0, RW),
+              [] (GObject *o, const GValue *v) { gtk_tree_view_column_set_spacing ((GtkTreeViewColumn *) o, g_value_get_int (v)); }, nullptr);
+  gtkqt_prop (klass, g_param_spec_object ("widget", nullptr, nullptr, GTK_TYPE_WIDGET, RW),
+              [] (GObject *o, const GValue *v) { gtk_tree_view_column_set_widget ((GtkTreeViewColumn *) o, (GtkWidget *) g_value_get_object (v)); }, nullptr);
   gtkqt_prop (klass, g_param_spec_int ("sort-column-id", nullptr, nullptr, -1, G_MAXINT, -1, RW),
               [] (GObject *o, const GValue *v) { gtk_tree_view_column_set_sort_column_id ((GtkTreeViewColumn *) o, g_value_get_int (v)); }, nullptr);
 }
@@ -873,6 +905,13 @@ public:
   gulong handlers[5] = {};
   std::function<QList<GObject *> ()> columns;   /* GtkTreeViewColumn* list, or a single pseudo column */
   std::function<QList<Cell> *(GObject *)> cells_of;
+  std::function<bool (GtkTreeIter *)> is_separator;   /* row separator function */
+
+  bool separator_row (const QModelIndex &i) const
+  {
+    GtkTreeIter it;
+    return is_separator && iter_of (node (i), &it) && is_separator (&it);
+  }
 
   GtkQtItemModel (GtkTreeModel *m) : model ((GtkTreeModel *) g_object_ref (m))
   {
@@ -1101,6 +1140,8 @@ public:
   QVariant data (const QModelIndex &i, int role) const override
   {
     if (!i.isValid ()) return QVariant ();
+    if (is_separator && (role == Qt::AccessibleDescriptionRole || role == Qt::DisplayRole) && separator_row (i))
+      return role == Qt::AccessibleDescriptionRole ? QVariant (QStringLiteral ("separator")) : QVariant ();
     QList<Cell> *cells = prepared (i);
     if (!cells) return QVariant ();
     QVariant out;
@@ -1134,7 +1175,7 @@ public:
         if (role == Qt::FontRole && (d->weight != 400 || d->scale != 1.0 || !d->font.isEmpty () || d->size_points > 0))
           out = cell_font (c.renderer, nullptr);
         else if (role == Qt::FontRole && d->markup.contains ("<b>")) { QFont f; f.setBold (true); out = f; }
-        if (role == Qt::TextAlignmentRole) out = int ((c.renderer->xalign > 0.75 ? Qt::AlignRight : c.renderer->xalign > 0.25 ? Qt::AlignHCenter : Qt::AlignLeft) | Qt::AlignVCenter);
+        if (role == Qt::TextAlignmentRole && !out.isValid ()) out = int ((c.renderer->xalign > 0.75 ? Qt::AlignRight : c.renderer->xalign > 0.25 ? Qt::AlignHCenter : Qt::AlignLeft) | Qt::AlignVCenter);
         break;
       }
     }
@@ -1145,6 +1186,7 @@ public:
   Qt::ItemFlags flags (const QModelIndex &i) const override
   {
     if (!i.isValid ()) return Qt::NoItemFlags;
+    if (separator_row (i)) return Qt::NoItemFlags;
     Qt::ItemFlags f = Qt::ItemIsEnabled | Qt::ItemIsSelectable;
     if (QList<Cell> *cells = prepared (i))
         for (Cell &c : *cells) {
@@ -1369,10 +1411,26 @@ struct ViewData {
   gpointer column_drop_data = nullptr;
   GDestroyNotify column_drop_destroy = nullptr;
   GtkTreeViewColumn *expander_column = nullptr;
+  /* type-ahead search */
+  bool enable_search = true;
+  int search_column = -1;
+  bool search_column_set = false;
+  GtkTreeViewSearchEqualFunc search_func = nullptr;
+  gpointer search_data = nullptr;
+  GDestroyNotify search_destroy = nullptr;
+  QString search_text;
+  QElapsedTimer search_timer;
+  int tooltip_column = -1;
+  gulong tooltip_handler = 0;
+  GtkTreeViewRowSeparatorFunc separator = nullptr;
+  gpointer separator_data = nullptr;
+  GDestroyNotify separator_destroy = nullptr;
   ~ViewData ()
   {
     if (drag_dest) gtk_tree_path_free (drag_dest);
     if (column_drop_destroy) column_drop_destroy (column_drop_data);
+    if (search_destroy) search_destroy (search_data);
+    if (separator_destroy) separator_destroy (separator_data);
   }
 };
 static ViewData *vd (GtkWidget *w) { return static_cast<ViewData *> (g_object_get_data (G_OBJECT (w), "gtkqt-view")); }
@@ -1383,6 +1441,14 @@ public:
   using QStyledItemDelegate::QStyledItemDelegate;
   void paint (QPainter *p, const QStyleOptionViewItem &opt, const QModelIndex &i) const override
   {
+    if (i.data (Qt::AccessibleDescriptionRole).toString () == QLatin1String ("separator")) {
+      p->save ();
+      p->setPen (opt.palette.color (QPalette::Mid));
+      int y = opt.rect.center ().y ();
+      p->drawLine (opt.rect.left (), y, opt.rect.right (), y);
+      p->restore ();
+      return;
+    }
     if (!paint_by_renderers (p, opt, i)) paint_cell (p, opt, i);
     paint_marks (p, opt, i);
   }
@@ -1624,9 +1690,56 @@ static void column_allocate (GtkWidget *vw, int section)
   g_signal_emit_by_name (c->button, "size-allocate", &a);
 }
 
+/* typing finds a row as GTK's search does: the search column's text (or
+ * the program's equal function) from the cursor row on */
+class GtkQtTreeView : public QTreeView {
+public:
+  GtkWidget *gw;
+  explicit GtkQtTreeView (GtkWidget *w) : gw (w) {}
+  void keyboardSearch (const QString &search) override
+  {
+    ViewData *d = vd (gw);
+    if (!d || !d->enable_search || !d->adapter || !d->model) return;
+    if (d->search_column < 0 && !d->search_func) { QTreeView::keyboardSearch (search); return; }
+    if (!d->search_timer.isValid () || d->search_timer.elapsed () > QApplication::keyboardInputInterval ()) d->search_text.clear ();
+    d->search_timer.restart ();
+    d->search_text += search;
+    QByteArray key = d->search_text.toUtf8 ();
+    QModelIndex start = currentIndex ().isValid () ? currentIndex ().siblingAtColumn (0) : model ()->index (0, 0);
+    if (!start.isValid ()) return;
+    QModelIndex i = start;
+    do {
+      GtkTreeIter it;
+      if (d->adapter->iter_of (d->adapter->node (i), &it) && row_matches (d, key, &it)) {
+        setCurrentIndex (i);
+        scrollTo (i);
+        return;
+      }
+      QModelIndex next = indexBelow (i);
+      i = next.isValid () ? next : model ()->index (0, 0);
+    } while (i != start);
+  }
+  static bool row_matches (ViewData *d, const QByteArray &key, GtkTreeIter *it)
+  {
+    if (d->search_func) return !d->search_func (d->model, d->search_column, key.constData (), it, d->search_data);
+    GValue v = G_VALUE_INIT;
+    gtk_tree_model_get_value (d->model, it, d->search_column, &v);
+    bool ok = false;
+    if (G_IS_VALUE (&v)) {
+      GValue str = G_VALUE_INIT;
+      g_value_init (&str, G_TYPE_STRING);
+      if (g_value_transform (&v, &str) && g_value_get_string (&str))
+        ok = QString::fromUtf8 (g_value_get_string (&str)).startsWith (QString::fromUtf8 (key), Qt::CaseInsensitive);
+      g_value_unset (&str);
+      g_value_unset (&v);
+    }
+    return ok;
+  }
+};
+
 static QObject *tree_view_create (GtkWidget *w)
 {
-  auto *tv = new QTreeView;
+  auto *tv = new GtkQtTreeView (w);
   tv->setItemDelegate (new GtkQtCellDelegate (tv));
   tv->setUniformRowHeights (true);
   tv->setAllColumnsShowFocus (true);
@@ -1845,12 +1958,22 @@ void gtk_tree_view_set_model (GtkTreeView *view, GtkTreeModel *model)
   a->setParent (tv);
   a->columns = [w] { QList<GObject *> l; if (ViewData *vdd = vd (w)) for (auto *c : vdd->columns) l << G_OBJECT (c); return l; };
   a->cells_of = [] (GObject *c) -> QList<Cell> * { return &cd (c)->cells; };
+  a->is_separator = [w] (GtkTreeIter *it) {
+    ViewData *vdd = vd (w);
+    return vdd && vdd->separator && vdd->separator (vdd->model, it, vdd->separator_data);
+  };
   d->adapter = a;
   tv->setModel (a);
   QItemSelectionModel *old = tv->selectionModel ();
   tv->setSelectionModel (new GtkQtSelectionModel (a, w, a));
   delete old;
   tv->setRootIsDecorated (!(gtk_tree_model_get_flags (model) & GTK_TREE_MODEL_LIST_ONLY));
+  /* GTK searches the first text column unless told otherwise */
+  if (!d->search_column_set) {
+    d->search_column = -1;
+    for (int c = 0; c < gtk_tree_model_get_n_columns (model); c++)
+      if (gtk_tree_model_get_column_type (model, c) == G_TYPE_STRING) { d->search_column = c; break; }
+  }
   gtk_tree_view_get_selection (view);
   connect_selection (w);
   view_apply_columns (w);
@@ -1919,8 +2042,108 @@ void gtk_tree_view_set_headers_visible (GtkTreeView *view, gboolean v) { if (aut
 void gtk_tree_view_set_headers_clickable (GtkTreeView *view, gboolean v) { if (ViewData *d = vd (GTK_WIDGET (view))) { d->headers_clickable = v; view_apply_columns (GTK_WIDGET (view)); } }
 void gtk_tree_view_set_rules_hint (GtkTreeView *view, gboolean v) { if (auto *tv = gtkqt_q<QTreeView> (GTK_WIDGET (view))) tv->setAlternatingRowColors (v); }
 void gtk_tree_view_set_reorderable (GtkTreeView *, gboolean) {}
-void gtk_tree_view_set_enable_search (GtkTreeView *, gboolean) {}
-void gtk_tree_view_set_search_column (GtkTreeView *, gint) {}
+void gtk_tree_view_set_enable_search (GtkTreeView *view, gboolean v) { if (ViewData *d = vd (GTK_WIDGET (view))) d->enable_search = v; }
+gboolean gtk_tree_view_get_enable_search (GtkTreeView *view) { ViewData *d = vd (GTK_WIDGET (view)); return d && d->enable_search; }
+void gtk_tree_view_set_search_column (GtkTreeView *view, gint column)
+{
+  if (ViewData *d = vd (GTK_WIDGET (view))) { d->search_column = column; d->search_column_set = true; }
+}
+gint gtk_tree_view_get_search_column (GtkTreeView *view) { ViewData *d = vd (GTK_WIDGET (view)); return d ? d->search_column : -1; }
+void gtk_tree_view_set_search_equal_func (GtkTreeView *view, GtkTreeViewSearchEqualFunc func, gpointer data, GDestroyNotify destroy)
+{
+  ViewData *d = vd (GTK_WIDGET (view));
+  if (!d) return;
+  if (d->search_destroy) d->search_destroy (d->search_data);
+  d->search_func = func;
+  d->search_data = data;
+  d->search_destroy = destroy;
+}
+
+/* separator rows: a line, not selectable */
+void gtk_tree_view_set_row_separator_func (GtkTreeView *view, GtkTreeViewRowSeparatorFunc func, gpointer data, GDestroyNotify destroy)
+{
+  ViewData *d = vd (GTK_WIDGET (view));
+  if (!d) return;
+  if (d->separator_destroy) d->separator_destroy (d->separator_data);
+  d->separator = func;
+  d->separator_data = data;
+  d->separator_destroy = destroy;
+  if (d->adapter) d->adapter->reset ();
+}
+
+/* ---------- tooltips of rows ---------- */
+gboolean gtk_tree_view_get_tooltip_context (GtkTreeView *view, gint *x, gint *y, gboolean keyboard_tip, GtkTreeModel **model,
+                                            GtkTreePath **path, GtkTreeIter *iter)
+{
+  ViewData *d = vd (GTK_WIDGET (view));
+  if (!d || !d->model) return FALSE;
+  GtkTreePath *p = nullptr;
+  if (keyboard_tip) {
+    gtk_tree_view_get_cursor (view, &p, nullptr);
+  } else {
+    gint bx, by;
+    gtk_tree_view_convert_widget_to_bin_window_coords (view, *x, *y, &bx, &by);
+    *x = bx;
+    *y = by;
+    if (!gtk_tree_view_get_path_at_pos (view, bx, by, &p, nullptr, nullptr, nullptr)) return FALSE;
+  }
+  if (!p) return FALSE;
+  if (model) *model = d->model;
+  if (iter) gtk_tree_model_get_iter (d->model, iter, p);
+  if (path) *path = p; else gtk_tree_path_free (p);
+  return TRUE;
+}
+
+/* the tip stays while the pointer is over the row (in widget coordinates) */
+void gtk_tree_view_set_tooltip_cell (GtkTreeView *view, GtkTooltip *tooltip, GtkTreePath *path, GtkTreeViewColumn *column,
+                                     GtkCellRenderer *)
+{
+  GdkRectangle r;
+  gtk_tree_view_get_background_area (view, path, column, &r);
+  QTreeView *tv = gtkqt_q<QTreeView> (GTK_WIDGET (view));
+  if (!tv) return;
+  if (!column) { r.x = 0; r.width = tv->viewport ()->width (); }
+  if (!path) { r.y = 0; r.height = tv->viewport ()->height (); }
+  gint wx, wy;
+  gtk_tree_view_convert_bin_window_to_widget_coords (view, r.x, r.y, &wx, &wy);
+  r.x = wx;
+  r.y = wy;
+  gtk_tooltip_set_tip_area (tooltip, &r);
+}
+void gtk_tree_view_set_tooltip_row (GtkTreeView *view, GtkTooltip *tooltip, GtkTreePath *path)
+{
+  gtk_tree_view_set_tooltip_cell (view, tooltip, path, nullptr, nullptr);
+}
+
+static gboolean tooltip_column_query (GtkWidget *w, gint x, gint y, gboolean keyboard, GtkTooltip *tooltip, gpointer)
+{
+  ViewData *d = vd (w);
+  GtkTreeModel *m;
+  GtkTreePath *p;
+  GtkTreeIter it;
+  if (!d || d->tooltip_column < 0 || !gtk_tree_view_get_tooltip_context (GTK_TREE_VIEW (w), &x, &y, keyboard, &m, &p, &it)) return FALSE;
+  gchar *markup = nullptr;
+  gtk_tree_model_get (m, &it, d->tooltip_column, &markup, -1);
+  bool shown = markup && *markup;
+  if (shown) {
+    gtk_tooltip_set_markup (tooltip, markup);
+    gtk_tree_view_set_tooltip_row (GTK_TREE_VIEW (w), tooltip, p);
+  }
+  g_free (markup);
+  gtk_tree_path_free (p);
+  return shown;
+}
+
+void gtk_tree_view_set_tooltip_column (GtkTreeView *view, gint column)
+{
+  ViewData *d = vd (GTK_WIDGET (view));
+  if (!d) return;
+  d->tooltip_column = column;
+  if (column >= 0 && !d->tooltip_handler)
+    d->tooltip_handler = g_signal_connect (view, "query-tooltip", G_CALLBACK (tooltip_column_query), nullptr);
+  if (column >= 0) gtk_widget_set_has_tooltip (GTK_WIDGET (view), TRUE);
+}
+gint gtk_tree_view_get_tooltip_column (GtkTreeView *view) { ViewData *d = vd (GTK_WIDGET (view)); return d ? d->tooltip_column : -1; }
 void gtk_tree_view_expand_all (GtkTreeView *view) { if (auto *tv = gtkqt_q<QTreeView> (GTK_WIDGET (view))) tv->expandAll (); }
 void gtk_tree_view_collapse_all (GtkTreeView *view) { if (auto *tv = gtkqt_q<QTreeView> (GTK_WIDGET (view))) tv->collapseAll (); }
 
@@ -2109,6 +2332,13 @@ static QList<Cell> *layout_cells (GtkCellLayout *l)
   return cells;
 }
 
+struct SeparatorFunc {
+  GtkTreeViewRowSeparatorFunc func;
+  gpointer data;
+  GDestroyNotify destroy;
+  ~SeparatorFunc () { if (destroy) destroy (data); }
+};
+
 static void combo_refresh (GtkComboBox *combo)
 {
   if (auto *c = gtkqt_q<QComboBox> (GTK_WIDGET (combo))) if (auto *a = dynamic_cast<GtkQtItemModel *> (c->model ())) a->reset ();
@@ -2143,6 +2373,50 @@ void gtk_cell_layout_set_attributes (GtkCellLayout *l, GtkCellRenderer *cell, ..
 
 void gtk_cell_layout_clear (GtkCellLayout *l) { cells_clear (*layout_cells (l)); }
 
+void gtk_cell_layout_clear_attributes (GtkCellLayout *l, GtkCellRenderer *cell)
+{
+  for (Cell &c : *layout_cells (l)) if (c.renderer == cell) c.attrs.clear ();
+  if (GTK_IS_COMBO_BOX (l)) combo_refresh (GTK_COMBO_BOX (l));
+  else if (GTK_IS_TREE_VIEW_COLUMN (l)) column_changed ((GtkTreeViewColumn *) l);
+}
+
+GList *gtk_cell_layout_get_cells (GtkCellLayout *l)
+{
+  GList *out = nullptr;
+  for (Cell &c : *layout_cells (l)) out = g_list_append (out, c.renderer);
+  return out;
+}
+
+/* the layout's data function: like a column's (the layout comes first) */
+void gtk_cell_layout_set_cell_data_func (GtkCellLayout *l, GtkCellRenderer *cell, GtkCellLayoutDataFunc func, gpointer data,
+                                         GDestroyNotify destroy)
+{
+  for (Cell &c : *layout_cells (l))
+    if (c.renderer == cell) {
+      if (c.func_destroy) c.func_destroy (c.func_data);
+      c.func = (GtkTreeCellDataFunc) (gpointer) func;
+      c.func_data = data;
+      c.func_destroy = destroy;
+    }
+  if (GTK_IS_COMBO_BOX (l)) combo_refresh (GTK_COMBO_BOX (l));
+  else if (GTK_IS_TREE_VIEW_COLUMN (l)) column_changed ((GtkTreeViewColumn *) l);
+}
+
+void gtk_combo_box_set_row_separator_func (GtkComboBox *combo, GtkTreeViewRowSeparatorFunc func, gpointer data, GDestroyNotify destroy)
+{
+  g_object_set_data_full (G_OBJECT (combo), "gtkqt-row-separator", new SeparatorFunc { func, data, destroy },
+                          [] (gpointer p) { delete static_cast<SeparatorFunc *> (p); });
+  combo_refresh (combo);
+}
+
+/* GTK lays a wrapped popup out as a grid; Qt's combo popup is a list */
+void gtk_combo_box_set_wrap_width (GtkComboBox *combo, gint width)
+{
+  g_object_set_data (G_OBJECT (combo), "gtkqt-wrap-width", GINT_TO_POINTER (width));
+  if (auto *c = gtkqt_q<QComboBox> (GTK_WIDGET (combo))) c->setMaxVisibleItems (width > 1 ? qMax (10, width * 5) : 10);
+}
+gint gtk_combo_box_get_wrap_width (GtkComboBox *combo) { return GPOINTER_TO_INT (g_object_get_data (G_OBJECT (combo), "gtkqt-wrap-width")); }
+
 GtkWidget *gtk_combo_box_new_with_model (GtkTreeModel *model)
 {
   GtkWidget *w = gtk_combo_box_new ();
@@ -2161,6 +2435,10 @@ void gtk_combo_box_set_model (GtkComboBox *combo, GtkTreeModel *model)
   GObject *self = G_OBJECT (combo);
   a->columns = [self] { return QList<GObject *> { self }; };
   a->cells_of = [] (GObject *o) -> QList<Cell> * { return layout_cells ((GtkCellLayout *) o); };
+  a->is_separator = [self, model] (GtkTreeIter *it) {
+    auto *sep = static_cast<SeparatorFunc *> (g_object_get_data (self, "gtkqt-row-separator"));
+    return sep && sep->func && sep->func (model, it, sep->data);
+  };
   QSignalBlocker block (c);
   c->setModel (a);
   c->setCurrentIndex (-1);
